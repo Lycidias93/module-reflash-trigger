@@ -1,0 +1,682 @@
+#!/system/bin/sh
+set -eu
+
+MODULE_ID="module-reflash-trigger"
+MODULE_NAME="Module Reflash Trigger"
+MODULE_VERSION="v0.1.0"
+MODULE_VERSION_CODE="100"
+MODULES_DIR="/data/adb/modules"
+RUNTIME_DIR="/data/adb/module-reflash-trigger"
+BACKUP_DIR="$RUNTIME_DIR/backups"
+STATE_DIR="$RUNTIME_DIR/state"
+LOG_DIR="$RUNTIME_DIR/logs"
+CONFIG_FILE="$RUNTIME_DIR/config.env"
+TRIGGER_VERSION="0.0.0-reflash-trigger"
+TRIGGER_VERSION_CODE="1"
+
+mkdir -p "$BACKUP_DIR" "$STATE_DIR" "$LOG_DIR" "$STATE_DIR/remote" "$STATE_DIR/fresh" "$STATE_DIR/pending" 2>/dev/null || true
+[ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date)" "$*" >> "$LOG_DIR/mrt.log" 2>/dev/null || true; }
+err() { printf 'ERROR: %s\n' "$*" >&2; }
+json_escape() { printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+prop_get() {
+  key="$1"; file_path="$2"
+  awk -v k="$key" 'BEGIN{FS="="} $1==k {sub(/^[^=]*=/,"",$0); print; exit}' "$file_path" 2>/dev/null || true
+}
+
+module_reports_needs_reflash() {
+  # Some modules, notably j-hc/ReVanced Morphe modules, expose manager-visible
+  # reflash hints inside module.prop description without changing updateJson
+  # versionCode. Treat that as a first-class needs_reflash signal.
+  desc=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' 2>/dev/null || printf '%s' "${1:-}")
+  case "$desc" in
+    *"needs reflash"*|*"need reflash"*|*"needs_reflash"*|*"reflash required"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+prop_set() {
+  key="$1"; value="$2"; file_path="$3"
+  tmp="$file_path.tmp.$$"
+  awk -v k="$key" -v v="$value" 'BEGIN{FS=OFS="="; done=0} $1==k {$0=k"="v; done=1} {print} END{if(!done) print k"="v}' "$file_path" > "$tmp"
+  chmod --reference="$file_path" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
+  chown --reference="$file_path" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file_path"
+}
+
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+normalize_url() { printf '%s' "${1:-}" | sed 's/ /%20/g'; }
+normalize_head() {
+  # Keep only stable cache validators. Drop volatile/duplicated hop data.
+  awk 'BEGIN{IGNORECASE=1}
+    /^etag:/ {gsub(/^[Ee][Tt][Aa][Gg]:[[:space:]]*/, "etag=", $0); print; next}
+    /^last-modified:/ {gsub(/^[Ll][Aa][Ss][Tt]-[Mm][Oo][Dd][Ii][Ff][Ii][Ee][Dd]:[[:space:]]*/, "last-modified=", $0); print; next}
+    /^content-length:/ {gsub(/^[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Ll][Ee][Nn][Gg][Tt][Hh]:[[:space:]]*/, "content-length=", $0); print; next}
+  ' | sed 's/[[:space:]]*$//' | sort -u
+}
+sha256_text() {
+  if has_cmd sha256sum; then
+    sha256sum | awk '{print $1}'
+  elif has_cmd toybox; then
+    toybox sha256sum | awk '{print $1}'
+  elif has_cmd busybox; then
+    busybox sha256sum | awk '{print $1}'
+  else
+    cksum | awk '{print $1}'
+  fi
+}
+
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+code_cmp() {
+  a="${1:-}"; b="${2:-}"
+  is_uint "$a" && is_uint "$b" || { printf 'unknown\n'; return 0; }
+  awk -v a="$a" -v b="$b" 'BEGIN{a+=0;b+=0;if(a>b)print "gt";else if(a<b)print "lt";else print "eq"}'
+}
+
+fetch_url() {
+  raw_url="$1"
+  url=$(normalize_url "$raw_url")
+  if has_cmd curl; then
+    curl -fsSL --globoff --max-time "${MRT_FETCH_TIMEOUT:-20}" "$url"
+  elif has_cmd wget; then
+    wget -qO- "$url"
+  elif [ -x /data/adb/magisk/busybox ]; then
+    /data/adb/magisk/busybox wget -qO- "$url"
+  elif has_cmd busybox; then
+    busybox wget -qO- "$url"
+  else
+    return 127
+  fi
+}
+
+head_url() {
+  raw_url="$1"
+  url=$(normalize_url "$raw_url")
+  [ "${MRT_USE_ZIP_HEAD:-0}" = "1" ] || return 0
+  if has_cmd curl; then
+    curl -fsSIL --globoff --max-time "${MRT_FETCH_TIMEOUT:-20}" "$url" 2>/dev/null | normalize_head || true
+  else
+    return 0
+  fi
+}
+
+json_field() {
+  key="$1"
+  sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p; s/.*"'"$key"'"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+module_prop() { printf '%s/%s/module.prop' "$MODULES_DIR" "$1"; }
+module_dir() { printf '%s/%s' "$MODULES_DIR" "$1"; }
+remote_cache_file() { printf '%s/remote/%s.json' "$STATE_DIR" "$1"; }
+fingerprint_file() { printf '%s/remote/%s.fingerprint' "$STATE_DIR" "$1"; }
+fresh_file() { printf '%s/fresh/%s.fingerprint' "$STATE_DIR" "$1"; }
+pending_file() { printf '%s/pending/%s.fingerprint' "$STATE_DIR" "$1"; }
+
+list_module_ids() {
+  for prop in "$MODULES_DIR"/*/module.prop; do
+    [ -f "$prop" ] || continue
+    id=$(prop_get id "$prop")
+    [ -n "$id" ] || id=$(basename "$(dirname "$prop")")
+    printf '%s\n' "$id"
+  done | sort
+}
+
+is_update_capable() {
+  prop="$1"
+  [ -f "$prop" ] || return 1
+  update_json=$(prop_get updateJson "$prop")
+  [ -n "$update_json" ]
+}
+
+remote_fetch() {
+  id="$1"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || { err "module not found: $id"; return 2; }
+  url=$(prop_get updateJson "$prop")
+  [ -n "$url" ] || { err "module has no updateJson: $id"; return 3; }
+  json=$(fetch_url "$url") || { err "fetch failed: $url"; return 4; }
+  rcfile=$(remote_cache_file "$id")
+  printf '%s\n' "$json" > "$rcfile"
+  r_version=$(printf '%s\n' "$json" | json_field version || true)
+  r_code=$(printf '%s\n' "$json" | json_field versionCode || true)
+  r_zip=$(printf '%s\n' "$json" | json_field zipUrl || true)
+  norm_update_url=$(normalize_url "$url")
+  fp_payload="fingerprintVersion=dev7-stable-v1
+updateJson=$norm_update_url
+json=$json
+"
+  if [ -n "$r_zip" ]; then
+    h=$(head_url "$r_zip" || true)
+    fp_payload="$fp_payload
+zipHead=$h
+"
+  fi
+  fp=$(printf '%s' "$fp_payload" | sha256_text)
+  printf '%s\n' "$fp" > "$(fingerprint_file "$id")"
+  printf 'remote_version=%s\nremote_versionCode=%s\nremote_zipUrl=%s\nremote_fingerprint=%s\n' "$r_version" "$r_code" "$r_zip" "$fp"
+  return 0
+}
+
+status_one() {
+  id="$1"; online="${2:-0}"; format="${3:-text}"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || { err "module not found: $id"; return 2; }
+  dir=$(module_dir "$id")
+  name=$(prop_get name "$prop")
+  version=$(prop_get version "$prop")
+  versionCode=$(prop_get versionCode "$prop")
+  updateJson=$(prop_get updateJson "$prop")
+  description=$(prop_get description "$prop")
+  moduleNeedsReflashMarker="false"; module_reports_needs_reflash "$description" && moduleNeedsReflashMarker="true"
+  disabled="false"; [ -e "$dir/disable" ] && disabled="true"
+  remove_marker="false"; [ -e "$dir/remove" ] && remove_marker="true"
+  self="false"; [ "$id" = "$MODULE_ID" ] && self="true"
+  update_capable="false"; [ -n "$updateJson" ] && update_capable="true"
+  remoteVersion=""; remoteCode=""; remoteFingerprint=""; zipUrl=""; fetchStatus="not_requested"
+
+  if [ "$online" = "1" ] && [ -n "$updateJson" ]; then
+    rf=$(remote_fetch "$id" 2>/dev/null || true)
+    if [ -n "$rf" ]; then
+      fetchStatus="ok"
+      remoteVersion=$(printf '%s\n' "$rf" | awk -F= '$1=="remote_version"{sub(/^[^=]*=/,"",$0);print;exit}' || true)
+      remoteCode=$(printf '%s\n' "$rf" | awk -F= '$1=="remote_versionCode"{sub(/^[^=]*=/,"",$0);print;exit}' || true)
+      zipUrl=$(printf '%s\n' "$rf" | awk -F= '$1=="remote_zipUrl"{sub(/^[^=]*=/,"",$0);print;exit}' || true)
+      remoteFingerprint=$(printf '%s\n' "$rf" | awk -F= '$1=="remote_fingerprint"{sub(/^[^=]*=/,"",$0);print;exit}' || true)
+    else
+      fetchStatus="failed"
+    fi
+  elif [ -f "$(fingerprint_file "$id")" ]; then
+    remoteFingerprint=$(cat "$(fingerprint_file "$id")" 2>/dev/null || true)
+  fi
+
+  freshFingerprint=""; [ -f "$(fresh_file "$id")" ] && freshFingerprint=$(cat "$(fresh_file "$id")" 2>/dev/null || true)
+  pendingFingerprint=""; [ -f "$(pending_file "$id")" ] && pendingFingerprint=$(cat "$(pending_file "$id")" 2>/dev/null || true)
+  status="local_only"; triggerable="false"; needs_reflash="false"; reason="no_updateJson"
+
+  if [ "$update_capable" = "true" ]; then
+    status="update_capable"; triggerable="true"; reason="manual_reflash_trigger_available"
+    if [ "$self" = "true" ]; then
+      triggerable="false"; status="self"; reason="self_update_managed_by_manager"
+    elif [ "$disabled" = "true" ] || [ "$remove_marker" = "true" ]; then
+      triggerable="false"; status="blocked"; reason="disable_or_remove_marker_present"
+    elif [ "$moduleNeedsReflashMarker" = "true" ] && { [ "$fetchStatus" = "failed" ] || [ -z "$remoteCode" ] || [ -z "$versionCode" ]; }; then
+      status="needs_reflash"; needs_reflash="true"; reason="module_reported_needs_reflash_marker"
+    elif [ "$online" = "1" ] && [ "$fetchStatus" = "failed" ]; then
+      status="remote_fetch_failed"; reason="online_metadata_unavailable"; triggerable="true"
+    elif [ -n "$remoteCode" ] && [ -n "$versionCode" ]; then
+      cmp=$(code_cmp "$remoteCode" "$versionCode")
+      if [ "$cmp" = "gt" ]; then
+        status="update_available"; triggerable="false"; needs_reflash="false"; reason="manager_update_already_available"
+      elif [ "$cmp" = "eq" ]; then
+        status="same_remote_versionCode"
+        if [ "$moduleNeedsReflashMarker" = "true" ]; then
+          status="needs_reflash"; needs_reflash="true"; reason="module_reported_needs_reflash_marker"
+        elif [ -z "$remoteFingerprint" ]; then
+          reason="same_code_no_fingerprint"
+        elif [ -z "$freshFingerprint" ]; then
+          status="reflash_baseline_unknown"; reason="no_fresh_baseline_known"
+          [ "${MRT_AUTO_BASELINE_UNKNOWN:-0}" = "1" ] && needs_reflash="true"
+        elif [ "$remoteFingerprint" != "$freshFingerprint" ]; then
+          status="needs_reflash"; needs_reflash="true"; reason="remote_fingerprint_changed_since_last_fresh"
+        else
+          status="fresh"; reason="remote_fingerprint_matches_fresh_baseline"
+        fi
+      elif [ "$cmp" = "lt" ]; then
+        status="local_newer_than_remote"; triggerable="false"; reason="local_versionCode_higher_than_remote"
+      else
+        status="code_compare_unknown"; reason="non_numeric_versionCode"; triggerable="true"
+      fi
+    elif [ "$moduleNeedsReflashMarker" = "true" ]; then
+      status="needs_reflash"; needs_reflash="true"; reason="module_reported_needs_reflash_marker"
+    fi
+  fi
+
+  if [ "$format" = "json" ]; then
+    printf '{"id":"%s","name":"%s","version":"%s","versionCode":"%s","updateJson":"%s","description":"%s","moduleNeedsReflashMarker":%s,"self":%s,"disabled":%s,"remove_marker":%s,"update_capable":%s,"fetchStatus":"%s","remoteVersion":"%s","remoteCode":"%s","remoteFingerprint":"%s","freshFingerprint":"%s","pendingFingerprint":"%s","triggerable":%s,"needs_reflash":%s,"status":"%s","reason":"%s"}\n' \
+      "$(json_escape "$id")" "$(json_escape "$name")" "$(json_escape "$version")" "$(json_escape "$versionCode")" "$(json_escape "$updateJson")" "$(json_escape "$description")" "$moduleNeedsReflashMarker" \
+      "$self" "$disabled" "$remove_marker" "$update_capable" "$(json_escape "$fetchStatus")" "$(json_escape "$remoteVersion")" "$(json_escape "$remoteCode")" "$(json_escape "$remoteFingerprint")" "$(json_escape "$freshFingerprint")" "$(json_escape "$pendingFingerprint")" \
+      "$triggerable" "$needs_reflash" "$(json_escape "$status")" "$(json_escape "$reason")"
+  else
+    printf 'module_dir=%s\n' "$dir"
+    printf '  id=%s\n  name=%s\n  version=%s\n  versionCode=%s\n  updateJson=%s\n' "$id" "$name" "$version" "$versionCode" "$updateJson"
+    printf '  moduleNeedsReflashMarker=%s\n' "$moduleNeedsReflashMarker"
+    [ "$moduleNeedsReflashMarker" = "true" ] && printf '  moduleNeedsReflashText=%s\n' "$description"
+    printf '  status=%s\n  reason=%s\n  triggerable=%s\n  needs_reflash=%s\n' "$status" "$reason" "$triggerable" "$needs_reflash"
+    [ -n "$remoteCode" ] && printf '  remoteVersion=%s\n  remoteCode=%s\n' "$remoteVersion" "$remoteCode"
+  fi
+  return 0
+}
+
+scan() {
+  online="${1:-0}"; format="${2:-text}"
+  count=0; first=1
+  [ "$format" = "json" ] && printf '['
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    if [ "$format" = "json" ]; then
+      [ "$first" = "1" ] || printf ','
+      if ! status_one "$id" "$online" json; then
+        printf '{"id":"%s","status":"scan_error","triggerable":false,"needs_reflash":false}' "$(json_escape "$id")"
+      fi
+      first=0
+    else
+      if ! status_one "$id" "$online" text; then
+        printf 'module_id=%s\n  status=scan_error\n  triggerable=false\n  needs_reflash=false\n' "$id"
+      fi
+    fi
+    count=$((count+1))
+  done
+  if [ "$format" = "json" ]; then printf ']\n'; else printf 'targets=%s\n' "$count"; fi
+  return 0
+}
+
+count_update_capable() {
+  c=0
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    c=$((c+1))
+  done
+  printf '%s\n' "$c"
+}
+
+require_triggerable_static() {
+  id="$1"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || { err "module not found: $id"; exit 2; }
+  [ "$id" != "$MODULE_ID" ] || { err "refusing to trigger self module: $id"; exit 3; }
+  [ -n "$(prop_get updateJson "$prop")" ] || { err "module has no updateJson: $id"; exit 4; }
+  dir=$(module_dir "$id")
+  [ ! -e "$dir/disable" ] || { err "module disabled marker present: $id"; exit 5; }
+  [ ! -e "$dir/remove" ] || { err "module remove marker present: $id"; exit 6; }
+}
+
+backup_prop() {
+  id="$1"; backup_id="$2"
+  prop=$(module_prop "$id")
+  dest="$BACKUP_DIR/$backup_id/$id"
+  mkdir -p "$dest"
+  cp -p "$prop" "$dest/module.prop"
+  printf '%s\n' "$prop" > "$dest/source_path.txt"
+  printf '%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date)" > "$dest/created_at.txt"
+  [ -f "$(fingerprint_file "$id")" ] && cp -p "$(fingerprint_file "$id")" "$dest/remote.fingerprint"
+}
+
+trigger_one() {
+  id="$1"; assume_yes="${2:-0}"; force="${3:-0}"
+  require_triggerable_static "$id"
+  if [ "$force" != "1" ]; then
+    js=$(status_one "$id" 1 json || status_one "$id" 0 json)
+    triggerable=$(printf '%s' "$js" | sed -n 's/.*"triggerable":\(true\|false\).*/\1/p')
+    status=$(printf '%s' "$js" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+    [ "$triggerable" = "true" ] || { err "module not triggerable without --force: $id status=$status"; exit 7; }
+  fi
+  prop=$(module_prop "$id")
+  old_version=$(prop_get version "$prop")
+  old_code=$(prop_get versionCode "$prop")
+  backup_id=$(date '+%Y%m%d_%H%M%S')
+  if [ "$assume_yes" != "1" ]; then
+    printf 'About to trigger module=%s old_version=%s old_versionCode=%s\n' "$id" "$old_version" "$old_code"
+    printf 'Type YES to continue: '
+    read ans
+    [ "$ans" = "YES" ] || { err "aborted"; exit 10; }
+  fi
+  remote_fetch "$id" >/dev/null 2>&1 || true
+  backup_prop "$id" "$backup_id"
+  [ -f "$(fingerprint_file "$id")" ] && cp -p "$(fingerprint_file "$id")" "$(pending_file "$id")"
+  prop_set version "$TRIGGER_VERSION" "$prop"
+  prop_set versionCode "$TRIGGER_VERSION_CODE" "$prop"
+  sync 2>/dev/null || true
+  printf 'UPDATED module=%s version=%s->%s versionCode=%s->%s\n' "$id" "$old_version" "$TRIGGER_VERSION" "$old_code" "$TRIGGER_VERSION_CODE"
+  printf 'backup_dir=%s/%s/%s\n' "$BACKUP_DIR" "$backup_id" "$id"
+  printf 'ACTION: close and reopen your root/module manager, then run its normal online update/reflash.\n'
+  log "trigger module=$id backup_id=$backup_id old_code=$old_code"
+}
+
+restore_latest() {
+  id="$1"
+  latest=$(ls -1d "$BACKUP_DIR"/*/"$id" 2>/dev/null | sort | tail -n 1 || true)
+  [ -n "$latest" ] || { err "no backup found for $id"; exit 2; }
+  cp -p "$latest/module.prop" "$(module_prop "$id")"
+  sync 2>/dev/null || true
+  printf 'RESTORED module=%s from=%s\n' "$id" "$latest"
+  log "restore_latest module=$id from=$latest"
+}
+
+mark_fresh() {
+  id="$1"; mode="${2:-remote}"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || { err "module not found: $id"; exit 2; }
+  if [ "$mode" != "cached" ]; then
+    remote_fetch "$id" >/dev/null 2>&1 || true
+  fi
+  if [ -f "$(fingerprint_file "$id")" ]; then
+    cp -p "$(fingerprint_file "$id")" "$(fresh_file "$id")"
+  elif [ -f "$(pending_file "$id")" ]; then
+    cp -p "$(pending_file "$id")" "$(fresh_file "$id")"
+  else
+    err "cannot determine remote fingerprint for $id"
+    exit 3
+  fi
+  rm -f "$(pending_file "$id")" 2>/dev/null || true
+  printf 'MARKED_FRESH module=%s fingerprint=%s\n' "$id" "$(cat "$(fresh_file "$id")")"
+  log "mark_fresh module=$id mode=$mode"
+}
+
+auto_allowed() {
+  id="$1"
+  [ "${MRT_AUTO_TRIGGER_ENABLED:-0}" = "1" ] || return 1
+  for x in ${MRT_AUTO_TRIGGER_MODULE_IDS:-}; do
+    [ "$x" = "$id" ] && return 0
+  done
+  return 1
+}
+
+auto_trigger() {
+  assume_yes="${1:-0}"
+  [ "$assume_yes" = "1" ] || { err "auto-trigger requires --yes"; exit 9; }
+  count=0
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    auto_allowed "$id" || continue
+    js=$(status_one "$id" 1 json)
+    needs=$(printf '%s' "$js" | sed -n 's/.*"needs_reflash":\(true\|false\).*/\1/p')
+    triggerable=$(printf '%s' "$js" | sed -n 's/.*"triggerable":\(true\|false\).*/\1/p')
+    if [ "$needs" = "true" ] && [ "$triggerable" = "true" ]; then
+      trigger_one "$id" 1 0
+      count=$((count+1))
+    fi
+  done
+  printf 'auto_triggered=%s\n' "$count"
+  return 0
+}
+
+summary() {
+  printf '== %s ==\n' "$MODULE_NAME"
+  printf 'version=%s\n' "$MODULE_VERSION"
+  printf 'versionCode=%s\n' "$MODULE_VERSION_CODE"
+  printf 'runtime=%s\n' "$RUNTIME_DIR"
+  printf 'config=%s\n' "$CONFIG_FILE"
+  printf 'auto_enabled=%s\n' "${MRT_AUTO_TRIGGER_ENABLED:-0}"
+  printf 'auto_allowlist=%s\n' "${MRT_AUTO_TRIGGER_MODULE_IDS:-}"
+  printf 'updateJson_capable_modules=%s\n' "$(count_update_capable)"
+  return 0
+}
+
+write_config_auto() {
+  mode="${1:-}"; shift || true
+  mkdir -p "$RUNTIME_DIR"
+  if [ "$mode" = "--disable" ]; then
+    cat > "$CONFIG_FILE" <<EOF
+MRT_BOOT_AUTOSCAN=0
+MRT_AUTO_TRIGGER_ON_BOOT=0
+MRT_AUTO_TRIGGER_ENABLED=0
+MRT_AUTO_TRIGGER_MODULE_IDS=""
+MRT_AUTO_BASELINE_UNKNOWN=0
+MRT_USE_ZIP_HEAD=0
+EOF
+    printf 'CONFIG_WRITTEN auto_enabled=0 file=%s\n' "$CONFIG_FILE"
+    return 0
+  fi
+  [ "$mode" = "--enable" ] || { err "config-auto requires --enable <module-id...> or --disable"; exit 2; }
+  [ $# -gt 0 ] || { err "config-auto --enable requires at least one module id"; exit 2; }
+  ids="$*"
+  cat > "$CONFIG_FILE" <<EOF
+MRT_BOOT_AUTOSCAN=0
+MRT_AUTO_TRIGGER_ON_BOOT=0
+MRT_AUTO_TRIGGER_ENABLED=1
+MRT_AUTO_TRIGGER_MODULE_IDS="$ids"
+MRT_AUTO_BASELINE_UNKNOWN=0
+MRT_USE_ZIP_HEAD=0
+EOF
+  printf 'CONFIG_WRITTEN auto_enabled=1 ids=%s file=%s\n' "$ids" "$CONFIG_FILE"
+}
+
+config_show() {
+  if [ -f "$CONFIG_FILE" ]; then
+    cat "$CONFIG_FILE"
+  else
+    printf 'config_absent=%s\n' "$CONFIG_FILE"
+  fi
+}
+
+auto_trigger_dry_run() {
+  count=0
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    auto_allowed "$id" || continue
+    js=$(status_one "$id" 1 json)
+    needs=$(printf '%s' "$js" | sed -n 's/.*"needs_reflash":\(true\|false\).*/\1/p')
+    triggerable=$(printf '%s' "$js" | sed -n 's/.*"triggerable":\(true\|false\).*/\1/p')
+    status=$(printf '%s' "$js" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+    if [ "$needs" = "true" ] && [ "$triggerable" = "true" ]; then
+      printf 'WOULD_TRIGGER module=%s status=%s\n' "$id" "$status"
+      count=$((count+1))
+    else
+      printf 'SKIP module=%s status=%s needs_reflash=%s triggerable=%s\n' "$id" "$status" "$needs" "$triggerable"
+    fi
+  done
+  printf 'auto_trigger_dry_run_would_trigger=%s\n' "$count"
+}
+
+
+baseline_show() {
+  id="$1"; online="${2:-0}"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || { err "module not found: $id"; exit 2; }
+  if [ "$online" = "1" ]; then
+    remote_fetch "$id" >/dev/null 2>&1 || true
+  fi
+  printf '== baseline %s ==\n' "$id"
+  printf 'module_dir=%s\n' "$(module_dir "$id")"
+  printf 'fresh_file=%s\n' "$(fresh_file "$id")"
+  if [ -f "$(fresh_file "$id")" ]; then
+    printf 'freshFingerprint=%s\n' "$(cat "$(fresh_file "$id")")"
+  else
+    printf 'freshFingerprint=\n'
+  fi
+  printf 'remote_file=%s\n' "$(fingerprint_file "$id")"
+  if [ -f "$(fingerprint_file "$id")" ]; then
+    printf 'remoteFingerprint=%s\n' "$(cat "$(fingerprint_file "$id")")"
+  else
+    printf 'remoteFingerprint=\n'
+  fi
+  printf 'pending_file=%s\n' "$(pending_file "$id")"
+  if [ -f "$(pending_file "$id")" ]; then
+    printf 'pendingFingerprint=%s\n' "$(cat "$(pending_file "$id")")"
+  else
+    printf 'pendingFingerprint=\n'
+  fi
+  printf '\n== status-online ==\n'
+  status_one "$id" 1 text || true
+  return 0
+}
+
+clear_baseline() {
+  [ $# -gt 0 ] || { err "clear-baseline requires module id(s)"; exit 2; }
+  for id in "$@"; do
+    prop=$(module_prop "$id")
+    [ -f "$prop" ] || { err "module not found: $id"; exit 2; }
+    rm -f "$(fresh_file "$id")" "$(pending_file "$id")" 2>/dev/null || true
+    printf 'CLEARED_BASELINE module=%s\n' "$id"
+    log "clear_baseline module=$id"
+  done
+  return 0
+}
+
+test_mark_stale() {
+  id="$1"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || { err "module not found: $id"; exit 2; }
+  [ -n "$(prop_get updateJson "$prop")" ] || { err "module has no updateJson: $id"; exit 3; }
+  remote_fetch "$id" >/dev/null 2>&1 || { err "cannot fetch remote fingerprint for $id"; exit 4; }
+  ff=$(fresh_file "$id")
+  mkdir -p "$(dirname "$ff")"
+  if [ -f "$ff" ]; then
+    cp -p "$ff" "$ff.bak.$(date '+%Y%m%d_%H%M%S')" 2>/dev/null || true
+  fi
+  stale="test-stale:$(date '+%Y%m%d_%H%M%S'):$id"
+  printf '%s\n' "$stale" > "$ff"
+  printf 'TEST_MARKED_STALE module=%s freshFingerprint=%s\n' "$id" "$stale"
+  printf 'ACTION: run mrt status-online %s or auto-trigger --dry-run to verify needs_reflash path. Run mark-fresh %s to return to fresh baseline.\n' "$id" "$id"
+  log "test_mark_stale module=$id"
+  return 0
+}
+
+
+trigger_needed() {
+  mode="marker"; action="dry-run"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --mode) shift; mode="${1:-marker}" ;;
+      --mode=*) mode="${1#--mode=}" ;;
+      --marker|--markers|--manager-marker) mode="marker" ;;
+      --all) mode="all" ;;
+      --dry-run) action="dry-run" ;;
+      --yes) action="yes" ;;
+      *) err "unknown trigger-needed argument: $1"; exit 2 ;;
+    esac
+    shift || true
+  done
+  case "$mode" in marker|all) : ;; *) err "trigger-needed mode must be marker or all"; exit 2 ;; esac
+  case "$action" in dry-run|yes) : ;; *) err "trigger-needed action must be dry-run or yes"; exit 2 ;; esac
+
+  count=0; scanned=0
+  printf 'trigger_needed_mode=%s\n' "$mode"
+  printf 'trigger_needed_action=%s\n' "$action"
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    scanned=$((scanned+1))
+    js=$(status_one "$id" 1 json)
+    needs=$(printf '%s' "$js" | sed -n 's/.*"needs_reflash":\(true\|false\).*/\1/p')
+    marker=$(printf '%s' "$js" | sed -n 's/.*"moduleNeedsReflashMarker":\(true\|false\).*/\1/p')
+    triggerable=$(printf '%s' "$js" | sed -n 's/.*"triggerable":\(true\|false\).*/\1/p')
+    status=$(printf '%s' "$js" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+    reason=$(printf '%s' "$js" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')
+
+    eligible="false"
+    if [ "$mode" = "marker" ]; then
+      [ "$marker" = "true" ] && [ "$needs" = "true" ] && eligible="true"
+    else
+      [ "$needs" = "true" ] && eligible="true"
+    fi
+
+    if [ "$eligible" = "true" ] && [ "$triggerable" = "true" ]; then
+      if [ "$action" = "dry-run" ]; then
+        printf 'WOULD_TRIGGER module=%s status=%s reason=%s marker=%s\n' "$id" "$status" "$reason" "$marker"
+      else
+        trigger_one "$id" 1 0
+      fi
+      count=$((count+1))
+    else
+      printf 'SKIP module=%s status=%s reason=%s needs_reflash=%s marker=%s triggerable=%s\n' "$id" "$status" "$reason" "$needs" "$marker" "$triggerable"
+    fi
+  done
+  if [ "$action" = "dry-run" ]; then
+    printf 'trigger_needed_dry_run_would_trigger=%s\n' "$count"
+  else
+    printf 'trigger_needed_triggered=%s\n' "$count"
+    if [ "$count" -gt 0 ]; then
+      printf 'ACTION: close and reopen your root/module manager, then run its normal online update/reflash for triggered modules.\n'
+    fi
+  fi
+  printf 'trigger_needed_scanned=%s\n' "$scanned"
+  return 0
+}
+
+action_button() {
+  printf '== %s Action ==\n' "$MODULE_NAME"
+  summary
+  printf '\n== trigger manager-reported Needs reflash modules ==\n'
+  trigger_needed --mode marker --yes
+  printf '\nNOTE: This action only re-enables manager-side online update/reflash by lowering versionCode. It does not download or install third-party module ZIPs.\n'
+  printf 'RESULT: MRT_ACTION_TRIGGER_NEEDS_REFLASH_DONE rc=0\n'
+  return 0
+}
+
+usage() {
+  cat <<USAGEEOF
+$MODULE_NAME CLI (mrt)
+
+Commands:
+  mrt summary
+  mrt scan | list             # offline scan of updateJson-capable modules
+  mrt scan-json               # offline JSON list
+  mrt scan-online             # fetch updateJson and compare versionCode/fingerprint
+  mrt scan-online-json
+  mrt status <module-id>
+  mrt status-online <module-id>
+  mrt trigger <module-id>
+  mrt trigger --yes <module-id>
+  mrt trigger --force --yes <module-id>
+  mrt restore-latest <module-id>
+  mrt mark-fresh <module-id>
+  mrt mark-fresh --cached <module-id>
+  mrt baseline-show <module-id>
+  mrt baseline-show --online <module-id>
+  mrt clear-baseline <module-id...>
+  mrt test-mark-stale <module-id>       # test-only: simulate needs_reflash without touching module.prop
+  mrt trigger-needed --dry-run [--mode marker|all]
+  mrt trigger-needed --yes [--mode marker|all]
+  mrt action                            # Magisk Action button path: trigger manager-reported Needs reflash markers
+  mrt auto-trigger --dry-run
+  mrt auto-trigger --yes
+  mrt config-show
+  mrt config-auto --enable <module-id...>
+  mrt config-auto --disable
+
+Safety:
+  - refuses to trigger itself
+  - refuses modules without updateJson
+  - refuses disabled/remove-marked modules
+  - refuses local-newer/update-available modules unless --force is used
+  - auto-trigger is off unless MRT_AUTO_TRIGGER_ENABLED=1 and allowlist is set
+  - module-reported Needs reflash markers in module.prop description are treated as needs_reflash
+  - trigger-needed default mode is marker-only for public-safe Action Button behavior
+  - action button triggers manager-reported Needs reflash markers only and never auto-installs ZIPs
+  - test-mark-stale only changes MRT baseline state, never module.prop
+USAGEEOF
+}
+
+cmd="${1:-summary}"
+case "$cmd" in
+  summary) summary ;;
+  list|scan) scan 0 text ;;
+  scan-json) scan 0 json ;;
+  scan-online) scan 1 text ;;
+  scan-online-json) scan 1 json ;;
+  status) [ $# -ge 2 ] || { usage; exit 2; }; status_one "$2" 0 text ;;
+  status-online) [ $# -ge 2 ] || { usage; exit 2; }; status_one "$2" 1 text ;;
+  trigger)
+    if [ "${2:-}" = "--force" ]; then [ "${3:-}" = "--yes" ] && [ $# -ge 4 ] || { usage; exit 2; }; trigger_one "$4" 1 1
+    elif [ "${2:-}" = "--yes" ]; then [ $# -ge 3 ] || { usage; exit 2; }; trigger_one "$3" 1 0
+    else [ $# -ge 2 ] || { usage; exit 2; }; trigger_one "$2" 0 0
+    fi ;;
+  restore-latest) [ $# -ge 2 ] || { usage; exit 2; }; restore_latest "$2" ;;
+  mark-fresh)
+    if [ "${2:-}" = "--cached" ]; then [ $# -ge 3 ] || { usage; exit 2; }; mark_fresh "$3" cached
+    else [ $# -ge 2 ] || { usage; exit 2; }; mark_fresh "$2" remote
+    fi ;;
+  baseline-show)
+    if [ "${2:-}" = "--online" ]; then [ $# -ge 3 ] || { usage; exit 2; }; baseline_show "$3" 1
+    else [ $# -ge 2 ] || { usage; exit 2; }; baseline_show "$2" 0
+    fi ;;
+  clear-baseline) [ $# -ge 2 ] || { usage; exit 2; }; shift; clear_baseline "$@" ;;
+  test-mark-stale) [ $# -ge 2 ] || { usage; exit 2; }; test_mark_stale "$2" ;;
+  trigger-needed) shift; trigger_needed "$@" ;;
+  action) action_button ;;
+  auto-trigger)
+    if [ "${2:-}" = "--dry-run" ]; then auto_trigger_dry_run
+    elif [ "${2:-}" = "--yes" ]; then auto_trigger 1
+    else usage; exit 2; fi ;;
+  config-show) config_show ;;
+  config-auto) shift; write_config_auto "$@" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 2 ;;
+esac

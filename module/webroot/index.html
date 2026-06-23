@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Module Reflash Trigger</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Module Reflash Trigger</h1>
+      <p>Lists updateJson-capable modules and triggers a safe manager-side reflash by lowering the selected local versionCode.</p>
+    </header>
+    <section class="actions">
+      <button id="scan">Scan online</button>
+      <button id="scanOffline">Scan offline</button>
+      <button id="auto">Auto-trigger dry-run</button>
+      <button id="needsDry">Needs reflash dry-run</button>
+      <button id="needsTrigger">Trigger Needs reflash</button>
+    </section>
+    <section id="status" class="status">Idle</section>
+    <section id="modules" class="modules"></section>
+    <pre id="raw"></pre>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

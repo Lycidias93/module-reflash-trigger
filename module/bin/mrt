@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev2"
-MODULE_VERSION_CODE="10102"
+MODULE_VERSION="v0.1.1-dev3"
+MODULE_VERSION_CODE="10103"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"

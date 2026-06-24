@@ -1,135 +1,158 @@
-/* Module Reflash Trigger WebUI vNext dev2 */
+"use strict";
+
 const MRT = "/data/adb/modules/module-reflash-trigger/bin/mrt";
-const state = { modules: [], filter: "needs", lastDryRunWouldTrigger: 0, lastDryRunText: "", bridgeName: "" };
-
 const $ = (id) => document.getElementById(id);
-const raw = $("raw");
-const modulesEl = $("modules");
-const statsEl = $("stats");
-const filtersEl = $("filters");
-const lastScanEl = $("lastScan");
-const bridgeStatusEl = $("bridgeStatus");
-const realTriggerBtn = $("realTrigger");
+const state = {
+  modules: [],
+  filter: "needs",
+  selected: new Set(),
+  lastDryRunWouldTrigger: 0,
+  lastAutoDryRunWouldTrigger: 0,
+  lastRaw: ""
+};
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>'"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[c]));
-}
+const rawEl = $("raw");
+const statsEl = $("stats");
+const modulesEl = $("modules");
+const filtersEl = $("filters");
+const bridgeStatusEl = $("bridgeStatus");
+const lastStatusEl = $("lastStatus");
+const autoIdsEl = $("autoIds");
 
 function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-function setRaw(text) {
-  raw.textContent = text || "";
-}
-
 function bridgeCandidates() {
-  return [
-    ["ksu.exec", window.ksu && window.ksu.exec],
-    ["kernelsu.exec", window.kernelsu && window.kernelsu.exec],
-    ["webui.exec", window.webui && window.webui.exec],
-    ["apatch.exec", window.apatch && window.apatch.exec],
-    ["magisk.exec", window.magisk && window.magisk.exec],
-  ];
+  const w = window;
+  const candidates = [];
+  const add = (name, obj, method) => {
+    if (obj && typeof obj[method] === "function") candidates.push({ name, obj, method });
+  };
+  add("ksu.exec", w.ksu, "exec");
+  add("kernelsu.exec", w.kernelsu, "exec");
+  add("webui.exec", w.webui, "exec");
+  add("apatch.exec", w.apatch, "exec");
+  add("magisk.exec", w.magisk, "exec");
+  return candidates;
 }
 
 function findBridge() {
-  for (const [name, fn] of bridgeCandidates()) {
-    if (typeof fn === "function") return { name, fn };
-  }
-  return null;
+  const found = bridgeCandidates();
+  return found.length ? found[0] : null;
 }
 
-function formatResult(result) {
+function normalizeBridgeResult(result) {
+  if (result == null) return "";
   if (typeof result === "string") return result;
-  if (result && typeof result.stdout === "string" && result.stdout.length) return result.stdout;
-  if (result && typeof result.stderr === "string" && result.stderr.length) return result.stderr;
-  return JSON.stringify(result, null, 2);
+  if (typeof result === "object") {
+    if (typeof result.stdout === "string" || typeof result.stderr === "string") {
+      return [result.stdout || "", result.stderr || ""].filter(Boolean).join("\n");
+    }
+    if (typeof result.result === "string") return result.result;
+    try { return JSON.stringify(result, null, 2); } catch (_) { return String(result); }
+  }
+  return String(result);
 }
 
-async function execShell(command) {
+function callBridgeMethod(bridge, cmd) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(normalizeBridgeResult(value));
+    };
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    try {
+      // Important: call the Java bridge method on the injected object. Do not detach the method,
+      // otherwise Android WebView can throw: "Java bridge method can't be invoked on a non-injected object".
+      let result;
+      if (bridge.obj[bridge.method].length >= 2) {
+        result = bridge.obj[bridge.method](cmd, finish);
+      } else {
+        result = bridge.obj[bridge.method](cmd);
+      }
+      if (result && typeof result.then === "function") result.then(finish).catch(fail);
+      else if (result !== undefined) finish(result);
+      else setTimeout(() => finish(""), 250);
+    } catch (err) {
+      fail(err);
+    }
+  });
+}
+
+async function run(cmd, options = {}) {
+  rawEl.textContent = "$ " + cmd + "\n\n…running";
+  lastStatusEl.textContent = options.status || "Running command…";
   const bridge = findBridge();
   if (!bridge) {
-    throw new Error("No supported WebUI shell bridge found. Use CLI: " + MRT);
+    bridgeStatusEl.textContent = "No shell bridge detected. Open through a root manager WebUI, or use CLI.";
+    rawEl.textContent = "$ " + cmd + "\n\nERROR: No supported shell bridge detected.";
+    throw new Error("No shell bridge detected");
   }
-  state.bridgeName = bridge.name;
-  bridgeStatusEl.textContent = "Shell bridge: " + bridge.name;
-  const result = bridge.fn(command);
-  return await Promise.resolve(result);
-}
-
-async function run(command) {
-  setRaw(`$ ${command}\n\nRunning...`);
+  bridgeStatusEl.textContent = "Shell bridge detected: " + bridge.name;
   try {
-    const result = await execShell(command);
-    const text = formatResult(result);
-    setRaw(text);
-    return text;
-  } catch (error) {
-    const text = String(error && (error.message || error));
-    bridgeStatusEl.textContent = "Shell bridge error";
-    setRaw(`$ ${command}\n\nERROR: ${text}`);
-    throw error;
+    const output = await callBridgeMethod(bridge, cmd);
+    state.lastRaw = output;
+    rawEl.textContent = "$ " + cmd + "\n\n" + output;
+    lastStatusEl.textContent = "Command completed.";
+    return output;
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    rawEl.textContent = "$ " + cmd + "\n\nERROR invoking " + bridge.name + ": " + msg;
+    lastStatusEl.textContent = "Shell bridge error";
+    throw err;
   }
 }
 
-function readModuleList(text) {
-  const parsed = JSON.parse(text);
-  if (Array.isArray(parsed)) return parsed;
-  if (Array.isArray(parsed.modules)) return parsed.modules;
-  return [];
-}
-
-function boolValue(value) {
-  return value === true || value === "true";
+function parseJsonArray(text) {
+  const trimmed = String(text || "").trim();
+  const start = trimmed.indexOf("[");
+  const end = trimmed.lastIndexOf("]");
+  if (start < 0 || end < start) throw new Error("No JSON array in output");
+  return JSON.parse(trimmed.slice(start, end + 1));
 }
 
 function normalizeStatus(module) {
-  const status = module.status || "unknown";
-  const marker = boolValue(module.moduleNeedsReflashMarker);
-  if (status === "blocked" || boolValue(module.disabled) || boolValue(module.remove_marker) || module.triggerable === false) return "blocked";
-  if (marker) return "needs";
-  if (status === "fresh") return "fresh";
-  if (status === "remote_fingerprint_changed_since_last_fresh") return "drift";
-  if (status === "reflash_baseline_unknown") return "unknown";
-  if (status === "local_newer_than_remote") return "localNewer";
-  return "other";
+  if (!module) return "unknown";
+  if (module.self || module.disabled || module.removeMarker || module.status === "blocked") return "blocked";
+  if (module.status === "local_newer_than_remote") return "local_newer";
+  if (module.moduleNeedsReflashMarker && module.needs_reflash) return "needs";
+  if (module.status === "fresh") return "fresh";
+  if (module.needs_reflash || module.reason === "remote_fingerprint_changed_since_last_fresh") return "drift";
+  if (module.status === "reflash_baseline_unknown") return "unknown";
+  return module.status || "unknown";
 }
 
-function labelFor(module) {
-  const labels = {
-    needs: "Needs reflash marker",
-    fresh: "Fresh",
-    drift: "Fingerprint drift",
-    unknown: "Baseline unknown",
-    localNewer: "Local newer",
-    blocked: "Blocked",
-    other: "Other"
-  };
-  return labels[normalizeStatus(module)] || "Other";
-}
-
-function countByGroup(modules) {
-  const counts = { all: modules.length, needs: 0, fresh: 0, drift: 0, unknown: 0, localNewer: 0, blocked: 0, other: 0 };
-  for (const module of modules) counts[normalizeStatus(module)] = (counts[normalizeStatus(module)] || 0) + 1;
-  return counts;
+function counts() {
+  const c = { needs: 0, fresh: 0, drift: 0, unknown: 0, local_newer: 0, blocked: 0, total: state.modules.length };
+  for (const m of state.modules) {
+    const s = normalizeStatus(m);
+    if (Object.prototype.hasOwnProperty.call(c, s)) c[s] += 1;
+    else c.unknown += 1;
+  }
+  return c;
 }
 
 function renderStats() {
-  const counts = countByGroup(state.modules);
-  const cards = [
-    ["needs", "Needs reflash", "Manager/module marker"],
-    ["fresh", "Fresh", "Baseline matches"],
-    ["drift", "Drift", "Diagnostic only"],
-    ["unknown", "Unknown", "No baseline yet"],
-    ["blocked", "Blocked", "Unsafe target"],
-    ["all", "Total", "updateJson-capable"]
+  const c = counts();
+  const items = [
+    ["needs", "Needs reflash", c.needs, "Manager/module marker"],
+    ["fresh", "Fresh", c.fresh, "Baseline matches"],
+    ["drift", "Drift", c.drift, "Diagnostic only"],
+    ["unknown", "Unknown", c.unknown, "No baseline yet"],
+    ["local_newer", "Local newer", c.local_newer, "No trigger"],
+    ["blocked", "Blocked", c.blocked, "Unsafe target"],
+    ["all", "Total", c.total, "updateJson-capable"]
   ];
-  statsEl.innerHTML = cards.map(([key, title, subtitle]) => `
-    <button class="mrt-stat ${state.filter === key ? "active" : ""}" type="button" data-filter="${key}">
-      <span>${escapeHtml(title)}</span>
-      <strong>${counts[key] || 0}</strong>
-      <small>${escapeHtml(subtitle)}</small>
+  statsEl.innerHTML = items.map(([key, label, value, hint]) => `
+    <button class="mrt-stat ${state.filter === key ? "active" : ""}" data-filter="${key}">
+      <span>${label}</span><strong>${value}</strong><small>${hint}</small>
     </button>
   `).join("");
   statsEl.querySelectorAll("button[data-filter]").forEach((button) => {
@@ -140,133 +163,207 @@ function renderStats() {
 function renderFilters() {
   const filters = [
     ["needs", "Needs reflash"], ["fresh", "Fresh"], ["drift", "Drift"],
-    ["unknown", "Unknown"], ["localNewer", "Local newer"], ["blocked", "Blocked"], ["all", "All"]
+    ["unknown", "Unknown"], ["local_newer", "Local newer"], ["blocked", "Blocked"], ["all", "All"]
   ];
-  filtersEl.innerHTML = filters.map(([key, label]) => `<button class="chip ${state.filter === key ? "active" : ""}" type="button" data-filter="${key}">${escapeHtml(label)}</button>`).join("");
+  filtersEl.innerHTML = filters.map(([key, label]) => `<button class="chip ${state.filter === key ? "active" : ""}" data-filter="${key}">${label}</button>`).join("");
   filtersEl.querySelectorAll("button[data-filter]").forEach((button) => {
     button.onclick = () => { state.filter = button.dataset.filter; render(); };
   });
 }
 
+function badge(module) {
+  const s = normalizeStatus(module);
+  const text = {
+    needs: "Needs reflash", fresh: "Fresh", drift: "Drift", unknown: "Unknown",
+    local_newer: "Local newer", blocked: "Blocked"
+  }[s] || s;
+  return `<span class="badge ${s}">${text}</span>`;
+}
+
 function field(label, value) {
-  if (value === undefined || value === null || value === "") return "";
-  return `<div class="field"><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code></div>`;
+  const safe = value == null || value === "" ? "—" : String(value);
+  return `<div class="field"><span>${label}</span><code>${safe}</code></div>`;
+}
+
+function selectedAttr(id) {
+  return state.selected.has(id) ? "checked" : "";
 }
 
 function renderModule(module) {
-  const group = normalizeStatus(module);
-  const triggerable = boolValue(module.triggerable);
-  const marker = boolValue(module.moduleNeedsReflashMarker);
-  const id = module.id || module.moduleId || "unknown";
-  const reason = module.reason || "";
-  const markerText = module.moduleNeedsReflashText || "";
-  const canSingleTrigger = triggerable && group !== "blocked";
-
-  return `<article class="mrt-card ${escapeHtml(group)}">
+  const s = normalizeStatus(module);
+  const canTrigger = module.triggerable && !module.self && !module.disabled && !module.removeMarker;
+  const selected = selectedAttr(module.id);
+  return `<article class="mrt-card ${s}" data-id="${module.id}">
     <div class="card-head">
-      <div>
-        <h3>${escapeHtml(id)}</h3>
-        <p>${escapeHtml(module.name || "")}</p>
-      </div>
-      <span class="badge ${escapeHtml(group)}">${escapeHtml(labelFor(module))}</span>
+      <label class="select-line"><input type="checkbox" class="select-module" data-id="${module.id}" ${selected}> select</label>
+      ${badge(module)}
     </div>
-    <div class="fields">
-      ${field("status", module.status)}
-      ${field("reason", reason)}
-      ${field("marker", marker)}
-      ${field("triggerable", triggerable)}
-      ${field("local", (module.version || "") + " / " + (module.versionCode || ""))}
-      ${field("remote", (module.remoteVersion || "") + " / " + (module.remoteCode || ""))}
+    <h3>${module.name || module.id}</h3>
+    <p class="module-id">${module.id}</p>
+    <div class="fields compact">
+      ${field("Version", module.version + " / " + module.versionCode)}
+      ${field("Remote", (module.remoteVersion || "") + (module.remoteCode ? " / " + module.remoteCode : ""))}
+      ${field("Reason", module.reason)}
+      ${field("Marker", module.moduleNeedsReflashMarker ? "true" : "false")}
+      ${module.moduleNeedsReflashText ? `<div class="marker-text">${module.moduleNeedsReflashText}</div>` : ""}
     </div>
-    ${markerText ? `<p class="marker-text">${escapeHtml(markerText)}</p>` : ""}
     <details>
-      <summary>updateJson / raw identifiers</summary>
-      <div class="fields compact">
-        ${field("updateJson", module.updateJson)}
-        ${field("remoteFingerprint", module.remoteFingerprint)}
-        ${field("freshFingerprint", module.freshFingerprint)}
-      </div>
+      <summary>updateJson</summary>
+      <code class="url">${module.updateJson || "—"}</code>
     </details>
     <div class="card-actions">
-      <button ${canSingleTrigger ? "" : "disabled"} type="button" data-action="single-trigger" data-id="${escapeHtml(id)}">Trigger this module</button>
-      <button type="button" data-action="mark-fresh" data-id="${escapeHtml(id)}">Mark fresh</button>
-      <button type="button" data-action="restore" data-id="${escapeHtml(id)}">Restore latest</button>
-      <button type="button" data-action="baseline" data-id="${escapeHtml(id)}">Baseline</button>
+      <button data-action="status" data-id="${module.id}">Status online</button>
+      <button data-action="trigger" data-id="${module.id}" class="danger" ${canTrigger ? "" : "disabled"}>Trigger this module</button>
+      <button data-action="fresh" data-id="${module.id}">Mark fresh</button>
+      <button data-action="freshCached" data-id="${module.id}">Mark fresh cached</button>
+      <button data-action="baseline" data-id="${module.id}">Baseline</button>
+      <button data-action="clear" data-id="${module.id}">Clear baseline</button>
+      <button data-action="restore" data-id="${module.id}">Restore latest</button>
     </div>
   </article>`;
 }
 
-function renderModules() {
-  let visible = state.modules;
-  if (state.filter !== "all") visible = visible.filter((module) => normalizeStatus(module) === state.filter);
-  modulesEl.innerHTML = visible.length ? visible.map(renderModule).join("") : `<div class="empty">No modules in this filter.</div>`;
+function bindModuleActions() {
+  modulesEl.querySelectorAll(".select-module").forEach((box) => {
+    box.onchange = () => {
+      if (box.checked) state.selected.add(box.dataset.id);
+      else state.selected.delete(box.dataset.id);
+      syncAutoIdsFromSelection(false);
+    };
+  });
   modulesEl.querySelectorAll("button[data-action]").forEach((button) => {
     const id = button.dataset.id;
-    const q = shellQuote(id);
-    if (button.dataset.action === "single-trigger") {
-      button.onclick = () => {
-        if (confirm(`Prepare ${id} for manager-side reflash? MRT lowers local version/versionCode only.`)) {
-          run(`${MRT} trigger --yes ${q}`).then(() => scan(true)).catch(() => {});
-        }
-      };
-    } else if (button.dataset.action === "mark-fresh") {
-      button.onclick = () => run(`${MRT} mark-fresh ${q}`).then(() => scan(true)).catch(() => {});
-    } else if (button.dataset.action === "restore") {
-      button.onclick = () => run(`${MRT} restore-latest ${q}`).then(() => scan(true)).catch(() => {});
-    } else if (button.dataset.action === "baseline") {
-      button.onclick = () => run(`${MRT} baseline-show --online ${q}`).catch(() => {});
-    }
+    const quoted = shellQuote(id);
+    button.onclick = async () => {
+      const action = button.dataset.action;
+      if (action === "status") return run(`${MRT} status-online ${quoted}`, { status: "Reading module status…" });
+      if (action === "baseline") return run(`${MRT} baseline-show --online ${quoted}`, { status: "Reading baseline…" });
+      if (action === "fresh") {
+        if (!confirm(`Mark ${id} fresh using online metadata?`)) return;
+        return run(`${MRT} mark-fresh ${quoted}`, { status: "Marking fresh…" });
+      }
+      if (action === "freshCached") {
+        if (!confirm(`Mark ${id} fresh from cached/pending fingerprint?`)) return;
+        return run(`${MRT} mark-fresh --cached ${quoted}`, { status: "Marking cached fresh…" });
+      }
+      if (action === "clear") {
+        if (!confirm(`Clear MRT baseline for ${id}? This does not touch module.prop.`)) return;
+        return run(`${MRT} clear-baseline ${quoted}`, { status: "Clearing baseline…" });
+      }
+      if (action === "restore") {
+        if (!confirm(`Restore latest MRT backup for ${id}?`)) return;
+        return run(`${MRT} restore-latest ${quoted}`, { status: "Restoring module.prop backup…" });
+      }
+      if (action === "trigger") {
+        const ok = confirm(`Trigger ${id}?\n\nThis lowers local version/versionCode so your manager can offer its normal online reflash/update. MRT will not download or install ZIPs.`);
+        if (!ok) return;
+        const really = confirm(`Final confirmation: prepare ${id} for manager-side reflash now?`);
+        if (!really) return;
+        return run(`${MRT} trigger --yes ${quoted}`, { status: "Triggering selected module…" });
+      }
+    };
   });
+}
+
+function renderModules() {
+  let visible = state.modules.slice();
+  if (state.filter !== "all") visible = visible.filter((module) => normalizeStatus(module) === state.filter);
+  modulesEl.innerHTML = visible.length ? visible.map(renderModule).join("") : `<div class="empty">No modules in this filter.</div>`;
+  bindModuleActions();
 }
 
 function render() {
   renderStats();
   renderFilters();
   renderModules();
-  realTriggerBtn.disabled = !(state.lastDryRunWouldTrigger > 0);
 }
 
 async function scan(online) {
-  const command = `${MRT} ${online ? "scan-online-json" : "scan-json"}`;
   try {
-    const text = await run(command);
-    state.modules = readModuleList(text);
-    lastScanEl.textContent = `${online ? "Online" : "Local"} scan: ${state.modules.length} modules · ${new Date().toLocaleString()}`;
+    const out = await run(`${MRT} ${online ? "scan-online-json" : "scan-json"}`, { status: online ? "Scanning online…" : "Scanning local…" });
+    state.modules = parseJsonArray(out);
     state.lastDryRunWouldTrigger = 0;
-    state.lastDryRunText = "";
-  } catch (error) {
-    state.modules = [];
-    lastScanEl.textContent = "Scan failed. See raw output.";
+    state.lastAutoDryRunWouldTrigger = 0;
+    $("needsTrigger").disabled = true;
+    $("autoRun").disabled = true;
+    lastStatusEl.textContent = `Scan complete: ${state.modules.length} modules.`;
+    render();
+  } catch (err) {
+    lastStatusEl.textContent = "Scan failed. See raw output.";
+    render();
   }
-  render();
 }
 
-async function dryRunMarker() {
-  const text = await run(`${MRT} trigger-needed --dry-run --mode marker`);
-  state.lastDryRunText = text;
-  const match = text.match(/trigger_needed_dry_run_would_trigger=(\d+)/);
-  state.lastDryRunWouldTrigger = match ? Number(match[1]) : 0;
-  realTriggerBtn.disabled = !(state.lastDryRunWouldTrigger > 0);
-  return text;
+function dryRunCount(output, key) {
+  const match = String(output || "").match(new RegExp(key + "=([0-9]+)"));
+  return match ? Number(match[1]) : 0;
 }
 
-function wireUi() {
-  $("scanOnline").onclick = () => scan(true);
-  $("scanLocal").onclick = () => scan(false);
-  $("dryRun").onclick = () => dryRunMarker().catch(() => {});
-  $("realTrigger").onclick = () => {
-    const n = state.lastDryRunWouldTrigger || 0;
-    if (n <= 0) return;
-    const ok1 = confirm(`Dry-run found ${n} manager-reported Needs reflash module(s). Continue?`);
-    if (!ok1) return;
-    const ok2 = confirm("This lowers local version/versionCode only. Your root manager must perform the final online reflash/update. Trigger now?");
-    if (ok2) run(`${MRT} trigger-needed --yes --mode marker`).then(() => scan(true)).catch(() => {});
-  };
-  $("configOff").onclick = () => run(`${MRT} config-auto --disable && ${MRT} config-show`).catch(() => {});
+function selectedIds() {
+  return [...state.selected].filter(Boolean);
 }
 
-wireUi();
+function textAreaIds() {
+  return autoIdsEl.value.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+function syncAutoIdsFromSelection(overwrite = true) {
+  if (!overwrite && autoIdsEl.value.trim()) return;
+  autoIdsEl.value = selectedIds().join(" ");
+}
+
+$("scanOnline").onclick = () => scan(true);
+$("scanLocal").onclick = () => scan(false);
+$("needsDry").onclick = async () => {
+  const out = await run(`${MRT} trigger-needed --dry-run --mode marker`, { status: "Dry-running marker action…" });
+  state.lastDryRunWouldTrigger = dryRunCount(out, "trigger_needed_dry_run_would_trigger");
+  $("needsTrigger").disabled = state.lastDryRunWouldTrigger < 1;
+};
+$("needsTrigger").onclick = async () => {
+  if (state.lastDryRunWouldTrigger < 1) return;
+  if (!confirm(`Trigger ${state.lastDryRunWouldTrigger} manager-reported Needs reflash module(s)?`)) return;
+  if (!confirm("Final confirmation: this lowers version/versionCode for eligible modules. Continue?")) return;
+  await run(`${MRT} trigger-needed --yes --mode marker`, { status: "Triggering marker modules…" });
+  await scan(false);
+};
+$("configShow").onclick = () => run(`${MRT} config-show`, { status: "Reading config…" });
+$("configOff").onclick = () => run(`${MRT} config-auto --disable && ${MRT} config-show`, { status: "Disabling auto…" });
+$("autoDisable2").onclick = () => run(`${MRT} config-auto --disable && ${MRT} config-show`, { status: "Disabling auto…" });
+$("autoFromSelected").onclick = () => syncAutoIdsFromSelection(true);
+$("autoEnable").onclick = async () => {
+  const ids = textAreaIds();
+  if (!ids.length) { alert("Choose or type at least one module ID for the auto allowlist."); return; }
+  if (!confirm("Enable auto mode for allowlisted module IDs only? This writes MRT config but does not trigger immediately.")) return;
+  await run(`${MRT} config-auto --enable ${ids.map(shellQuote).join(" ")} && ${MRT} config-show`, { status: "Enabling auto allowlist…" });
+};
+$("autoDry").onclick = async () => {
+  const out = await run(`${MRT} auto-trigger --dry-run`, { status: "Auto dry-run…" });
+  state.lastAutoDryRunWouldTrigger = dryRunCount(out, "auto_trigger_dry_run_would_trigger");
+  $("autoRun").disabled = state.lastAutoDryRunWouldTrigger < 1;
+};
+$("autoRun").onclick = async () => {
+  if (state.lastAutoDryRunWouldTrigger < 1) return;
+  if (!confirm(`Run auto-trigger for ${state.lastAutoDryRunWouldTrigger} allowlisted module(s)?`)) return;
+  if (!confirm("Final confirmation: auto-trigger lowers version/versionCode for allowlisted eligible modules. Continue?")) return;
+  await run(`${MRT} auto-trigger --yes`, { status: "Running auto-trigger…" });
+  await scan(false);
+};
+$("selectedFresh").onclick = async () => {
+  const ids = selectedIds();
+  if (!ids.length) { alert("Select one or more modules first."); return; }
+  if (!confirm(`Mark ${ids.length} selected module(s) fresh online?`)) return;
+  await run(ids.map((id) => `${MRT} mark-fresh ${shellQuote(id)}`).join(" && "), { status: "Marking selected fresh…" });
+  await scan(false);
+};
+$("selectedClear").onclick = async () => {
+  const ids = selectedIds();
+  if (!ids.length) { alert("Select one or more modules first."); return; }
+  if (!confirm(`Clear MRT baselines for ${ids.length} selected module(s)?`)) return;
+  await run(`${MRT} clear-baseline ${ids.map(shellQuote).join(" ")}`, { status: "Clearing selected baselines…" });
+  await scan(false);
+};
+
 const initialBridge = findBridge();
 bridgeStatusEl.textContent = initialBridge ? "Shell bridge detected: " + initialBridge.name : "No shell bridge detected yet. Try Scan; otherwise use CLI.";
 render();
-setTimeout(() => scan(true), 50);
+scan(true);

@@ -2,39 +2,39 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Module Reflash Trigger</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main class="mrt-shell">
-    <header class="mrt-hero">
+    <section class="mrt-hero">
       <div>
-        <p class="mrt-kicker">MRT WebUI vNext dev2</p>
+        <p class="mrt-kicker">MRT WebUI vNext dev3</p>
         <h1>Module Reflash Trigger</h1>
         <p class="mrt-subtitle">Prepare manager-reported <strong>Needs reflash</strong> modules for the normal root-manager online reflash path.</p>
       </div>
       <div class="mrt-hero-actions">
-        <button id="scanOnline" class="primary" type="button">Scan online</button>
-        <button id="scanLocal" type="button">Scan local</button>
+        <button id="scanOnline" class="primary">Scan online</button>
+        <button id="scanLocal">Scan local</button>
       </div>
-    </header>
+    </section>
 
     <section class="mrt-warning">
-      <strong>Safety contract:</strong> The Action path uses marker mode only. MRT does not download or install third-party ZIPs.
+      <strong>Safety contract:</strong> Default bulk Action path is marker mode only. Single-module trigger is explicit per card. MRT does not download or install third-party ZIPs.
     </section>
 
     <section class="mrt-panel">
       <div class="mrt-toolbar">
         <div>
           <h2>Dashboard</h2>
-          <p id="bridgeStatus" class="muted">Checking WebUI shell bridge…</p>
-          <p id="lastScan" class="muted">No scan yet.</p>
+          <p id="bridgeStatus" class="muted">Detecting shell bridge…</p>
+          <p id="lastStatus" class="muted">Ready.</p>
         </div>
         <div class="mrt-actions">
-          <button id="dryRun" class="safe" type="button">Dry-run marker action</button>
-          <button id="realTrigger" class="danger" type="button" disabled>Trigger marker modules</button>
-          <button id="configOff" type="button">Disable auto</button>
+          <button id="needsDry" class="safe">Dry-run marker action</button>
+          <button id="needsTrigger" class="danger" disabled>Trigger marker modules</button>
+          <button id="configOff">Disable auto</button>
         </div>
       </div>
       <div id="stats" class="mrt-stats"></div>
@@ -43,18 +43,54 @@
     <section class="mrt-panel">
       <div class="mrt-toolbar">
         <div>
-          <h2>Modules</h2>
-          <p class="muted">Filter by operational state. Drift is diagnostic only unless the CLI is used explicitly.</p>
+          <h2>Settings</h2>
+          <p class="muted">Auto mode is allowlist-only. Use dry-run before running auto-trigger.</p>
         </div>
-        <div id="filters" class="mrt-filters"></div>
+        <div class="mrt-actions">
+          <button id="configShow">Show config</button>
+          <button id="autoDry" class="safe">Auto dry-run</button>
+          <button id="autoRun" class="danger" disabled>Run auto-trigger</button>
+        </div>
       </div>
-      <div id="modules" class="mrt-modules"><div class="empty">Open loaded. Run a scan.</div></div>
+      <div class="settings-grid">
+        <label class="settings-box">
+          <span>Auto allowlist module IDs</span>
+          <textarea id="autoIds" rows="3" placeholder="one or space-separated module IDs"></textarea>
+          <small>Only listed IDs can be auto-triggered. Unknown/empty list is blocked.</small>
+        </label>
+        <div class="settings-box">
+          <span>Allowlist actions</span>
+          <div class="mrt-actions settings-actions">
+            <button id="autoFromSelected">Use selected modules</button>
+            <button id="autoEnable" class="danger">Enable auto for allowlist</button>
+            <button id="autoDisable2">Disable auto</button>
+          </div>
+          <small>Enable writes MRT config only. It does not trigger immediately.</small>
+        </div>
+      </div>
     </section>
 
-    <details class="mrt-panel mrt-raw" open>
-      <summary>Raw command output</summary>
-      <pre id="raw">Ready.</pre>
-    </details>
+    <section class="mrt-panel">
+      <div class="mrt-toolbar">
+        <div>
+          <h2>Modules</h2>
+          <p class="muted">Single-module actions are per card. Drift is diagnostic unless you explicitly trigger a module.</p>
+        </div>
+        <div class="mrt-actions">
+          <button id="selectedFresh">Mark selected fresh</button>
+          <button id="selectedClear">Clear selected baselines</button>
+        </div>
+      </div>
+      <div id="filters" class="mrt-filters"></div>
+      <div id="modules" class="mrt-modules"></div>
+    </section>
+
+    <section class="mrt-panel mrt-raw">
+      <details open>
+        <summary>Raw command output</summary>
+        <pre id="raw">No command run yet.</pre>
+      </details>
+    </section>
   </main>
   <script src="app.js"></script>
 </body>

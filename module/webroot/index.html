@@ -2,26 +2,59 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Module Reflash Trigger</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main>
-    <header>
-      <h1>Module Reflash Trigger</h1>
-      <p>Lists updateJson-capable modules and triggers a safe manager-side reflash by lowering the selected local versionCode.</p>
+  <main class="mrt-shell">
+    <header class="mrt-hero">
+      <div>
+        <p class="mrt-kicker">MRT WebUI vNext dev2</p>
+        <h1>Module Reflash Trigger</h1>
+        <p class="mrt-subtitle">Prepare manager-reported <strong>Needs reflash</strong> modules for the normal root-manager online reflash path.</p>
+      </div>
+      <div class="mrt-hero-actions">
+        <button id="scanOnline" class="primary" type="button">Scan online</button>
+        <button id="scanLocal" type="button">Scan local</button>
+      </div>
     </header>
-    <section class="actions">
-      <button id="scan">Scan online</button>
-      <button id="scanOffline">Scan offline</button>
-      <button id="auto">Auto-trigger dry-run</button>
-      <button id="needsDry">Needs reflash dry-run</button>
-      <button id="needsTrigger">Trigger Needs reflash</button>
+
+    <section class="mrt-warning">
+      <strong>Safety contract:</strong> The Action path uses marker mode only. MRT does not download or install third-party ZIPs.
     </section>
-    <section id="status" class="status">Idle</section>
-    <section id="modules" class="modules"></section>
-    <pre id="raw"></pre>
+
+    <section class="mrt-panel">
+      <div class="mrt-toolbar">
+        <div>
+          <h2>Dashboard</h2>
+          <p id="bridgeStatus" class="muted">Checking WebUI shell bridge…</p>
+          <p id="lastScan" class="muted">No scan yet.</p>
+        </div>
+        <div class="mrt-actions">
+          <button id="dryRun" class="safe" type="button">Dry-run marker action</button>
+          <button id="realTrigger" class="danger" type="button" disabled>Trigger marker modules</button>
+          <button id="configOff" type="button">Disable auto</button>
+        </div>
+      </div>
+      <div id="stats" class="mrt-stats"></div>
+    </section>
+
+    <section class="mrt-panel">
+      <div class="mrt-toolbar">
+        <div>
+          <h2>Modules</h2>
+          <p class="muted">Filter by operational state. Drift is diagnostic only unless the CLI is used explicitly.</p>
+        </div>
+        <div id="filters" class="mrt-filters"></div>
+      </div>
+      <div id="modules" class="mrt-modules"><div class="empty">Open loaded. Run a scan.</div></div>
+    </section>
+
+    <details class="mrt-panel mrt-raw" open>
+      <summary>Raw command output</summary>
+      <pre id="raw">Ready.</pre>
+    </details>
   </main>
   <script src="app.js"></script>
 </body>

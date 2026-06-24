@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev3"
-MODULE_VERSION_CODE="10103"
+MODULE_VERSION="v0.1.1-dev4"
+MODULE_VERSION_CODE="10104"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -645,7 +645,107 @@ USAGEEOF
 }
 
 cmd="${1:-summary}"
+
+
+# WebUI v0.1.1-dev4 file-backed scan bridge. Long scans run in the background and
+# large JSON output is read in small chunks so Android WebView bridges do not block
+# or truncate the module list.
+webui_dir() { printf '%s\n' "$RUNTIME_DIR/webui"; }
+webui_job_file() { printf '%s\n' "$(webui_dir)/job.env"; }
+webui_scan_file() {
+  case "${1:-online}" in
+    local) printf '%s\n' "$(webui_dir)/scan-local.json" ;;
+    online|*) printf '%s\n' "$(webui_dir)/scan-online.json" ;;
+  esac
+}
+webui_err_file() {
+  case "${1:-online}" in
+    local) printf '%s\n' "$(webui_dir)/scan-local.err" ;;
+    online|*) printf '%s\n' "$(webui_dir)/scan-online.err" ;;
+  esac
+}
+webui_write_job() {
+  mkdir -p "$(webui_dir)"
+  now="$(date +%s 2>/dev/null || echo 0)"
+  {
+    printf 'status=%s\n' "${1:-unknown}"
+    printf 'mode=%s\n' "${2:-}"
+    printf 'updated=%s\n' "$now"
+    printf 'pid=%s\n' "${3:-}"
+    printf 'rc=%s\n' "${4:-}"
+    printf 'message=%s\n' "${5:-}"
+  } > "$(webui_job_file)"
+}
+webui_scan_start() {
+  mode="${1:-online}"
+  case "$mode" in online|local) : ;; *) mode=online ;; esac
+  dir="$(webui_dir)"
+  mkdir -p "$dir"
+  rm -f "$dir/scan-$mode.json.tmp" "$(webui_err_file "$mode")"
+  webui_write_job running "$mode" "" "" "started"
+  ( "$0" __webui_scan_run "$mode" >/dev/null 2>&1 & echo "started mode=$mode" )
+}
+webui_scan_run() {
+  mode="${1:-online}"
+  dir="$(webui_dir)"
+  mkdir -p "$dir"
+  out="$(webui_scan_file "$mode")"
+  err="$(webui_err_file "$mode")"
+  tmp="$out.tmp"
+  webui_write_job running "$mode" "$$" "" "scan_running"
+  if [ "$mode" = "online" ]; then
+    if scan 1 json > "$tmp" 2> "$err"; then rc=0; else rc=$?; fi
+  else
+    if scan 0 json > "$tmp" 2> "$err"; then rc=0; else rc=$?; fi
+  fi
+  if [ "${rc:-1}" = 0 ]; then
+    mv -f "$tmp" "$out"
+    bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+    webui_write_job ok "$mode" "$$" "$rc" "bytes=$bytes"
+  else
+    rm -f "$tmp"
+    webui_write_job failed "$mode" "$$" "$rc" "scan_failed"
+  fi
+  exit "${rc:-1}"
+}
+webui_status() {
+  mkdir -p "$(webui_dir)"
+  job="$(webui_job_file)"
+  if [ -s "$job" ]; then cat "$job"; else webui_write_job idle none "" "" "no_job"; cat "$job"; fi
+  for mode in online local; do
+    f="$(webui_scan_file "$mode")"
+    e="$(webui_err_file "$mode")"
+    if [ -f "$f" ]; then printf '%s_bytes=%s\n' "$mode" "$(wc -c < "$f" 2>/dev/null || echo 0)"; else printf '%s_bytes=0\n' "$mode"; fi
+    if [ -f "$e" ]; then printf '%s_err_bytes=%s\n' "$mode" "$(wc -c < "$e" 2>/dev/null || echo 0)"; else printf '%s_err_bytes=0\n' "$mode"; fi
+  done
+}
+webui_read() {
+  mode="${1:-online}"
+  offset="${2:-0}"
+  count="${3:-4096}"
+  case "$mode" in online|local) : ;; *) mode=online ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=4096 ;; esac
+  [ "$count" -gt 8192 ] 2>/dev/null && count=8192
+  f="$(webui_scan_file "$mode")"
+  [ -f "$f" ] || exit 0
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null || true
+}
+webui_config_set_allowlist() {
+  ids="${*:-}"
+  if [ -z "$ids" ]; then
+    config_auto 0 ""
+  else
+    config_auto 1 "$ids"
+  fi
+}
+
 case "$cmd" in
+  webui-scan-start) webui_scan_start "${2:-online}" ;;
+  __webui_scan_run) webui_scan_run "${2:-online}" ;;
+  webui-status) webui_status ;;
+  webui-read) webui_read "${2:-online}" "${3:-0}" "${4:-4096}" ;;
+  webui-config-set-allowlist) shift; webui_config_set_allowlist "$@" ;;
   summary) summary ;;
   list|scan) scan 0 text ;;
   scan-json) scan 0 json ;;

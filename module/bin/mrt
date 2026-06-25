@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev4"
-MODULE_VERSION_CODE="10104"
+MODULE_VERSION="v0.1.1-dev5"
+MODULE_VERSION_CODE="10105"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -740,7 +740,94 @@ webui_config_set_allowlist() {
   fi
 }
 
+
+
+# WebUI v0.1.1-dev5 bridge-safe helpers. Commands below return one physical stdout
+# line or base64 chunks so WebView bridges that drop/truncate multi-line stdout still
+# work. dev4 file-backed scan helpers remain the data source.
+webui_status_line() {
+  mkdir -p "$(webui_dir)"
+  job="$(webui_job_file)"
+  if [ ! -s "$job" ]; then webui_write_job idle none "" "" "no_job"; fi
+  status=""; mode=""; updated=""; pid=""; rc=""; message=""
+  # shellcheck disable=SC1090
+  . "$job" 2>/dev/null || true
+  online_f="$(webui_scan_file online)"; online_e="$(webui_err_file online)"
+  local_f="$(webui_scan_file local)"; local_e="$(webui_err_file local)"
+  online_bytes=0; online_err_bytes=0; local_bytes=0; local_err_bytes=0
+  [ -f "$online_f" ] && online_bytes="$(wc -c < "$online_f" 2>/dev/null || echo 0)"
+  [ -f "$online_e" ] && online_err_bytes="$(wc -c < "$online_e" 2>/dev/null || echo 0)"
+  [ -f "$local_f" ] && local_bytes="$(wc -c < "$local_f" 2>/dev/null || echo 0)"
+  [ -f "$local_e" ] && local_err_bytes="$(wc -c < "$local_e" 2>/dev/null || echo 0)"
+  # Keep this a single line. Values are normalized to avoid shell/newline surprises.
+  message="$(printf '%s' "${message:-}" | tr '\n; ' '___')"
+  printf 'status=%s;mode=%s;updated=%s;pid=%s;rc=%s;message=%s;online_bytes=%s;online_err_bytes=%s;local_bytes=%s;local_err_bytes=%s\n' \
+    "${status:-unknown}" "${mode:-}" "${updated:-}" "${pid:-}" "${rc:-}" "${message:-}" \
+    "$online_bytes" "$online_err_bytes" "$local_bytes" "$local_err_bytes"
+}
+webui_read_b64() {
+  mode="${1:-online}"
+  offset="${2:-0}"
+  count="${3:-3072}"
+  case "$mode" in online|local) : ;; *) mode=online ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=3072 ;; esac
+  [ "$count" -gt 4096 ] 2>/dev/null && count=4096
+  f="$(webui_scan_file "$mode")"
+  [ -f "$f" ] || { printf '\n'; exit 0; }
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null | base64 | tr -d '\n'
+  printf '\n'
+}
+webui_marker_dry_run_line() {
+  mkdir -p "$(webui_dir)"
+  out="$(webui_dir)/marker-dry-run.out"
+  err="$(webui_dir)/marker-dry-run.err"
+  if trigger_needed --dry-run --mode marker > "$out" 2> "$err"; then xrc=0; else xrc=$?; fi
+  would="$(grep -E '^trigger_needed_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  scanned="$(grep -E '^trigger_needed_scanned=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+  err_bytes="$(wc -c < "$err" 2>/dev/null || echo 0)"
+  printf 'status=%s;rc=%s;would_trigger=%s;scanned=%s;bytes=%s;err_bytes=%s\n' \
+    "$([ "$xrc" = 0 ] && echo ok || echo failed)" "$xrc" "${would:-0}" "${scanned:-0}" "$bytes" "$err_bytes"
+}
+webui_auto_dry_run_line() {
+  mkdir -p "$(webui_dir)"
+  out="$(webui_dir)/auto-dry-run.out"
+  err="$(webui_dir)/auto-dry-run.err"
+  if auto_trigger --dry-run > "$out" 2> "$err"; then xrc=0; else xrc=$?; fi
+  would="$(grep -E '^auto_trigger_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+  err_bytes="$(wc -c < "$err" 2>/dev/null || echo 0)"
+  printf 'status=%s;rc=%s;would_trigger=%s;bytes=%s;err_bytes=%s\n' \
+    "$([ "$xrc" = 0 ] && echo ok || echo failed)" "$xrc" "${would:-0}" "$bytes" "$err_bytes"
+}
+webui_output_read_b64() {
+  name="${1:-marker-dry-run.out}"
+  offset="${2:-0}"
+  count="${3:-3072}"
+  case "$name" in marker-dry-run.out|marker-dry-run.err|auto-dry-run.out|auto-dry-run.err|scan-online.err|scan-local.err|job.env) : ;; *) name=marker-dry-run.out ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=3072 ;; esac
+  [ "$count" -gt 4096 ] 2>/dev/null && count=4096
+  f="$(webui_dir)/$name"
+  [ -f "$f" ] || { printf '\n'; exit 0; }
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null | base64 | tr -d '\n'
+  printf '\n'
+}
+webui_cache_clear() {
+  mkdir -p "$(webui_dir)"
+  rm -f "$(webui_dir)"/scan-online.json "$(webui_dir)"/scan-online.err "$(webui_dir)"/scan-local.json "$(webui_dir)"/scan-local.err "$(webui_dir)"/*.tmp
+  webui_write_job idle none "" "" "cache_cleared"
+  webui_status_line
+}
+
 case "$cmd" in
+  webui-status-line) webui_status_line ;;
+  webui-read-b64) webui_read_b64 "${2:-online}" "${3:-0}" "${4:-3072}" ;;
+  webui-marker-dry-run-line) webui_marker_dry_run_line ;;
+  webui-auto-dry-run-line) webui_auto_dry_run_line ;;
+  webui-output-read-b64) webui_output_read_b64 "${2:-marker-dry-run.out}" "${3:-0}" "${4:-3072}" ;;
+  webui-cache-clear) webui_cache_clear ;;
   webui-scan-start) webui_scan_start "${2:-online}" ;;
   __webui_scan_run) webui_scan_run "${2:-online}" ;;
   webui-status) webui_status ;;

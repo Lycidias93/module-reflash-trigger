@@ -2,31 +2,38 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Module Reflash Trigger</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main class="mrt-shell">
     <section class="mrt-hero">
-      <p class="mrt-kicker">MRT WebUI vNext dev5</p>
+      <p class="mrt-kicker">MRT WebUI vNext dev6</p>
       <h1>Module Reflash Trigger</h1>
-      <p class="mrt-subtitle">A guided WebUI for scanning, reviewing and safely preparing manager-side module reflashes.</p>
+      <p class="mrt-subtitle">Guided WebUI for scanning, reviewing and safely preparing manager-side module reflashes.</p>
       <div class="mrt-stepgrid">
         <button id="scanOnline" class="primary"><span>1</span><strong>Scan online</strong><small>Fetch updateJson and build cache</small></button>
-        <button id="loadOnline"><span>2</span><strong>Load results</strong><small>Read cached online scan</small></button>
+        <button id="loadOnline" class="primary-soft"><span>2</span><strong>Load latest results</strong><small>Shows cards after scan completes</small></button>
         <button id="refreshJob"><span>3</span><strong>Refresh status</strong><small>Check background job</small></button>
       </div>
-      <details class="secondary-actions"><summary>More scan options</summary><div class="mrt-actions"><button id="scanLocal">Start local scan</button><button id="loadLocal">Load local cache</button><button id="clearCache">Clear scan cache</button></div></details>
+      <div class="secondary-actions">
+        <button id="scanLocal">Scan local only</button>
+        <button id="loadLocal">Load local cache</button>
+        <button id="clearCache">Clear scan cache</button>
+      </div>
     </section>
 
-    <section class="mrt-warning"><strong>Safety contract:</strong> Bulk trigger stays marker-mode only. Single-module trigger is explicit per card. MRT does not download or install third-party ZIPs.</section>
+    <section class="mrt-warning"><strong>Safety contract:</strong> Bulk trigger stays marker-mode only. Single-module trigger is explicit in advanced card actions. MRT does not download or install third-party ZIPs.</section>
 
     <section class="mrt-panel mrt-status-panel">
-      <div class="mrt-toolbar"><div><h2>Status</h2><p id="status" class="muted">Ready.</p><p id="bridgeStatus" class="muted">Detecting shell bridge…</p></div><button id="helpBtn">What now?</button></div>
-      <div class="progress-wrap"><div id="progressBar" class="progress-bar"></div></div>
+      <div class="mrt-toolbar">
+        <div><h2>Status</h2><p id="status" class="muted">Ready.</p><p id="bridgeStatus" class="muted">Detecting shell bridge…</p></div>
+        <button id="helpBtn">What now?</button>
+      </div>
+      <div id="activity" class="activity-wrap" aria-label="scan activity"><div id="progressBar" class="progress-bar idle"></div></div>
       <div id="jobFacts" class="facts"></div>
-      <p id="nextStep" class="next-step">Start with <strong>Scan online</strong>. When it says ok, use <strong>Load results</strong>.</p>
+      <p id="nextStep" class="next-step">Start with <strong>Scan online</strong>. Results will auto-load when the scan is done.</p>
     </section>
 
     <section class="mrt-panel">
@@ -44,7 +51,7 @@
 
     <section class="mrt-panel">
       <h2>Modules</h2><p class="muted">Cards appear after loading a scan cache. Drift is diagnostic unless you explicitly trigger a module.</p>
-      <div class="mrt-actions"><button id="markSelectedFresh">Mark selected fresh</button><button id="clearSelectedBaselines">Clear selected baselines</button></div>
+      <details class="safe-bulk-actions"><summary>Selection actions</summary><div class="mrt-actions"><button id="markSelectedFresh">Mark selected fresh</button><button id="clearSelectedBaselines">Clear selected baselines</button></div></details>
       <div id="filters" class="mrt-filters"></div><div id="modules" class="mrt-modules"></div>
     </section>
 

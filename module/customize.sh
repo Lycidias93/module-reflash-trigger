@@ -21,6 +21,7 @@ mrt_morphe_ids() {
     updateJson="$(mrt_prop_get updateJson "$prop")"
     [ -n "$updateJson" ] || continue
     blob="$(printf '%s\n%s\n%s\n%s\n' "$id" "$(mrt_prop_get name "$prop")" "$(mrt_prop_get description "$prop")" "$updateJson" | tr '[:upper:]' '[:lower:]')"
+    case "$id $blob" in *rvmm*|*zygisk-mount*|*zygisk_mount*|*mounts\ the\ rvmm*|*mounts-the-rvmm*) continue ;; esac
     case "$blob" in *morphe*|*revanced-magisk-module*|*revanced*|*j-hc/revanced*) printf '%s\n' "$id" ;; esac
   done | sort
 }
@@ -45,7 +46,7 @@ mrt_write_config_morphe() {
   ids="$(mrt_morphe_ids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   cat > "$RUNTIME/config.env" <<EOF
 # Module Reflash Trigger config
-# Installer-selected Morphe/ReVanced auto profile.
+# Installer-selected strict Morphe/ReVanced app auto profile; rvmm/helper modules excluded.
 MRT_BOOT_AUTOSCAN=0
 MRT_AUTO_TRIGGER_ON_BOOT=$on_boot
 MRT_AUTO_TRIGGER_ENABLED=1
@@ -54,7 +55,7 @@ MRT_AUTO_TRIGGER_PROFILE="morphe"
 MRT_AUTO_BASELINE_UNKNOWN=0
 MRT_USE_ZIP_HEAD=0
 EOF
-  ui_print "- Auto mode: Morphe/ReVanced profile enabled"
+  ui_print "- Auto mode: Morphe/ReVanced app profile enabled"
   ui_print "- Auto on boot: $on_boot"
   ui_print "- Matched IDs: ${ids:-none yet; profile still active}"
 }
@@ -76,8 +77,8 @@ mrt_keycheck() {
 mrt_choose_auto_mode() {
   idx=0
   labels0="Passive/off"
-  labels1="Morphe/ReVanced auto on boot"
-  labels2="Morphe/ReVanced profile, manual/WebUI only"
+  labels1="Morphe/ReVanced apps auto on boot"
+  labels2="Morphe/ReVanced apps profile, manual/WebUI only"
   ui_print ""
   ui_print "- Auto mode setup"
   ui_print "  Vol+ cycles, Vol- selects"

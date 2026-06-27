@@ -1,7 +1,7 @@
 id=module-reflash-trigger
 name=Module Reflash Trigger
-version=v0.1.1-dev8
-versionCode=10108
+version=v0.1.1-dev9
+versionCode=10109
 author=Lycidias93
-description=Lists updateJson-capable modules and safely lowers selected module versionCode to re-enable manager-side online reflash/update; includes installer-selectable Morphe/ReVanced auto mode.
+description=Lists updateJson-capable modules and safely lowers selected module versionCode to re-enable manager-side online reflash/update; includes installer-selectable strict Morphe/ReVanced app auto mode excluding rvmm/helper modules.
 updateJson=https://raw.githubusercontent.com/Lycidias93/module-reflash-trigger/main/update.json

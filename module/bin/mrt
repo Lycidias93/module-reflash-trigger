@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev6"
-MODULE_VERSION_CODE="10106"
+MODULE_VERSION="v0.1.1-dev7"
+MODULE_VERSION_CODE="10107"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -821,7 +821,89 @@ webui_cache_clear() {
   webui_status_line
 }
 
+
+
+# WebUI v0.1.1-dev7 safe-action helpers. Long safe actions run in the background
+# so the WebView bridge never blocks on trigger-needed/config/auto dry-run output.
+webui_action_env() { printf '%s/action.env' "$(webui_dir)"; }
+webui_action_out() { printf '%s/action.out' "$(webui_dir)"; }
+webui_action_err() { printf '%s/action.err' "$(webui_dir)"; }
+webui_action_write() {
+  mkdir -p "$(webui_dir)"
+  status="$1"; action="$2"; pid="${3:-}"; rc="${4:-}"; message="${5:-}"
+  message="$(printf '%s' "$message" | tr '\n; ' '___')"
+  {
+    printf 'status=%s\n' "$status"
+    printf 'action=%s\n' "$action"
+    printf 'updated=%s\n' "$(date +%s)"
+    printf 'pid=%s\n' "$pid"
+    printf 'rc=%s\n' "$rc"
+    printf 'message=%s\n' "$message"
+  } > "$(webui_action_env)"
+}
+webui_action_status_line() {
+  mkdir -p "$(webui_dir)"
+  envf="$(webui_action_env)"
+  [ -s "$envf" ] || webui_action_write idle none "" "" no_action
+  status=""; action=""; updated=""; pid=""; rc=""; message=""
+  . "$envf" 2>/dev/null || true
+  out="$(webui_action_out)"; err="$(webui_action_err)"
+  bytes=0; err_bytes=0
+  [ -f "$out" ] && bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+  [ -f "$err" ] && err_bytes="$(wc -c < "$err" 2>/dev/null || echo 0)"
+  would=""; scanned=""
+  case "${action:-}" in
+    marker-dry-run)
+      would="$(grep -E '^trigger_needed_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+      scanned="$(grep -E '^trigger_needed_scanned=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+      ;;
+    auto-dry-run)
+      would="$(grep -E '^auto_trigger_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+      ;;
+  esac
+  if [ "${status:-}" = running ] && [ -n "${pid:-}" ] && ! kill -0 "$pid" 2>/dev/null; then
+    status=stale
+    message=pid_not_alive
+  fi
+  printf 'status=%s;action=%s;updated=%s;pid=%s;rc=%s;message=%s;bytes=%s;err_bytes=%s;would_trigger=%s;scanned=%s\n' \
+    "${status:-unknown}" "${action:-}" "${updated:-}" "${pid:-}" "${rc:-}" "${message:-}" "$bytes" "$err_bytes" "${would:-0}" "${scanned:-0}"
+}
+webui_action_start() {
+  action="${1:-marker-dry-run}"
+  case "$action" in marker-dry-run|auto-dry-run|config-show|config-disable) : ;; *) action=marker-dry-run ;; esac
+  mkdir -p "$(webui_dir)"
+  out="$(webui_action_out)"; err="$(webui_action_err)"
+  rm -f "$out" "$err"
+  self="$0"
+  (
+    xrc=0
+    case "$action" in
+      marker-dry-run) "$self" trigger-needed --dry-run --mode marker > "$out" 2> "$err" || xrc=$? ;;
+      auto-dry-run) "$self" auto-trigger --dry-run > "$out" 2> "$err" || xrc=$? ;;
+      config-show) "$self" config-show > "$out" 2> "$err" || xrc=$? ;;
+      config-disable) "$self" config-auto --disable > "$out" 2> "$err" || xrc=$?; "$self" config-show >> "$out" 2>> "$err" || xrc=$? ;;
+    esac
+    if [ "$xrc" = 0 ]; then webui_action_write ok "$action" "$BASHPID" "$xrc" done; else webui_action_write failed "$action" "$BASHPID" "$xrc" failed; fi
+  ) &
+  bgpid="$!"
+  webui_action_write running "$action" "$bgpid" "" started
+  webui_action_status_line
+}
+webui_action_output_b64() {
+  kind="${1:-out}"; offset="${2:-0}"; count="${3:-3072}"
+  case "$kind" in out) f="$(webui_action_out)" ;; err) f="$(webui_action_err)" ;; *) f="$(webui_action_out)" ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=3072 ;; esac
+  [ "$count" -gt 4096 ] 2>/dev/null && count=4096
+  [ -f "$f" ] || { printf '\n'; exit 0; }
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null | base64 | tr -d '\n'
+  printf '\n'
+}
+
 case "$cmd" in
+  webui-action-start) webui_action_start "${2:-marker-dry-run}" ;;
+  webui-action-status-line) webui_action_status_line ;;
+  webui-action-output-b64) webui_action_output_b64 "${2:-out}" "${3:-0}" "${4:-3072}" ;;
   webui-status-line) webui_status_line ;;
   webui-read-b64) webui_read_b64 "${2:-online}" "${3:-0}" "${4:-3072}" ;;
   webui-marker-dry-run-line) webui_marker_dry_run_line ;;

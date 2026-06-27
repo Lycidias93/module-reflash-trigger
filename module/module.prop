@@ -1,7 +1,7 @@
 id=module-reflash-trigger
 name=Module Reflash Trigger
-version=v0.1.1-dev6
-versionCode=10106
+version=v0.1.1-dev7
+versionCode=10107
 author=Lycidias93
 description=Lists updateJson-capable modules and safely lowers selected module versionCode to re-enable manager-side online reflash/update.
 updateJson=https://raw.githubusercontent.com/Lycidias93/module-reflash-trigger/main/update.json

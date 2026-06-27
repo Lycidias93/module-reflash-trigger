@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev7"
-MODULE_VERSION_CODE="10107"
+MODULE_VERSION="v0.1.1-dev8"
+MODULE_VERSION_CODE="10108"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -366,12 +366,46 @@ mark_fresh() {
   log "mark_fresh module=$id mode=$mode"
 }
 
+auto_profile_match() {
+  id="$1"
+  profile="${2:-${MRT_AUTO_TRIGGER_PROFILE:-}}"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || return 1
+  blob=$( {
+    printf '%s
+' "$id"
+    prop_get name "$prop"
+    prop_get description "$prop"
+    prop_get updateJson "$prop"
+  } | tr '[:upper:]' '[:lower:]' 2>/dev/null || true )
+  case "$profile" in
+    morphe|revanced|revanced-morphe)
+      case "$blob" in
+        *morphe*|*revanced-magisk-module*|*revanced*|*j-hc/revanced*) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+auto_profile_ids() {
+  profile="${1:-morphe}"
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    auto_profile_match "$id" "$profile" && printf '%s
+' "$id"
+  done | sort
+}
+
 auto_allowed() {
   id="$1"
   [ "${MRT_AUTO_TRIGGER_ENABLED:-0}" = "1" ] || return 1
   for x in ${MRT_AUTO_TRIGGER_MODULE_IDS:-}; do
     [ "$x" = "$id" ] && return 0
   done
+  profile="${MRT_AUTO_TRIGGER_PROFILE:-}"
+  [ -n "$profile" ] && auto_profile_match "$id" "$profile" && return 0
   return 1
 }
 
@@ -403,6 +437,8 @@ summary() {
   printf 'config=%s\n' "$CONFIG_FILE"
   printf 'auto_enabled=%s\n' "${MRT_AUTO_TRIGGER_ENABLED:-0}"
   printf 'auto_allowlist=%s\n' "${MRT_AUTO_TRIGGER_MODULE_IDS:-}"
+  printf 'auto_profile=%s\n' "${MRT_AUTO_TRIGGER_PROFILE:-}"
+  printf 'auto_on_boot=%s\n' "${MRT_AUTO_TRIGGER_ON_BOOT:-0}"
   printf 'updateJson_capable_modules=%s\n' "$(count_update_capable)"
   return 0
 }
@@ -416,13 +452,41 @@ MRT_BOOT_AUTOSCAN=0
 MRT_AUTO_TRIGGER_ON_BOOT=0
 MRT_AUTO_TRIGGER_ENABLED=0
 MRT_AUTO_TRIGGER_MODULE_IDS=""
+MRT_AUTO_TRIGGER_PROFILE=""
 MRT_AUTO_BASELINE_UNKNOWN=0
 MRT_USE_ZIP_HEAD=0
 EOF
-    printf 'CONFIG_WRITTEN auto_enabled=0 file=%s\n' "$CONFIG_FILE"
+    printf 'CONFIG_WRITTEN auto_enabled=0 file=%s
+' "$CONFIG_FILE"
     return 0
   fi
-  [ "$mode" = "--enable" ] || { err "config-auto requires --enable <module-id...> or --disable"; exit 2; }
+  if [ "$mode" = "--profile" ] || [ "$mode" = "--morphe" ]; then
+    if [ "$mode" = "--morphe" ]; then
+      profile="morphe"
+    else
+      profile="${1:-morphe}"; shift || true
+    fi
+    on_boot=0
+    for arg in "$@"; do
+      case "$arg" in --on-boot|--boot) on_boot=1 ;; --manual|--no-boot) on_boot=0 ;; esac
+    done
+    case "$profile" in morphe|revanced|revanced-morphe) : ;; *) err "unsupported auto profile: $profile"; exit 2 ;; esac
+    ids=$(auto_profile_ids "$profile" | tr '
+' ' ' | sed 's/[[:space:]]*$//')
+    cat > "$CONFIG_FILE" <<EOF
+MRT_BOOT_AUTOSCAN=0
+MRT_AUTO_TRIGGER_ON_BOOT=$on_boot
+MRT_AUTO_TRIGGER_ENABLED=1
+MRT_AUTO_TRIGGER_MODULE_IDS="$ids"
+MRT_AUTO_TRIGGER_PROFILE="$profile"
+MRT_AUTO_BASELINE_UNKNOWN=0
+MRT_USE_ZIP_HEAD=0
+EOF
+    printf 'CONFIG_WRITTEN auto_enabled=1 profile=%s on_boot=%s ids=%s file=%s
+' "$profile" "$on_boot" "$ids" "$CONFIG_FILE"
+    return 0
+  fi
+  [ "$mode" = "--enable" ] || { err "config-auto requires --enable <module-id...>, --profile morphe [--on-boot], --morphe [--on-boot] or --disable"; exit 2; }
   [ $# -gt 0 ] || { err "config-auto --enable requires at least one module id"; exit 2; }
   ids="$*"
   cat > "$CONFIG_FILE" <<EOF
@@ -430,10 +494,12 @@ MRT_BOOT_AUTOSCAN=0
 MRT_AUTO_TRIGGER_ON_BOOT=0
 MRT_AUTO_TRIGGER_ENABLED=1
 MRT_AUTO_TRIGGER_MODULE_IDS="$ids"
+MRT_AUTO_TRIGGER_PROFILE=""
 MRT_AUTO_BASELINE_UNKNOWN=0
 MRT_USE_ZIP_HEAD=0
 EOF
-  printf 'CONFIG_WRITTEN auto_enabled=1 ids=%s file=%s\n' "$ids" "$CONFIG_FILE"
+  printf 'CONFIG_WRITTEN auto_enabled=1 ids=%s file=%s
+' "$ids" "$CONFIG_FILE"
 }
 
 config_show() {
@@ -627,8 +693,10 @@ Commands:
   mrt action                            # Magisk Action button path: trigger manager-reported Needs reflash markers
   mrt auto-trigger --dry-run
   mrt auto-trigger --yes
+  mrt auto-ids morphe                   # list installer/profile-matched Morphe/ReVanced ids
   mrt config-show
   mrt config-auto --enable <module-id...>
+  mrt config-auto --profile morphe [--on-boot]
   mrt config-auto --disable
 
 Safety:
@@ -636,7 +704,7 @@ Safety:
   - refuses modules without updateJson
   - refuses disabled/remove-marked modules
   - refuses local-newer/update-available modules unless --force is used
-  - auto-trigger is off unless MRT_AUTO_TRIGGER_ENABLED=1 and allowlist is set
+  - auto-trigger is off unless MRT_AUTO_TRIGGER_ENABLED=1 and an allowlist/profile permits the module
   - module-reported Needs reflash markers in module.prop description are treated as needs_reflash
   - trigger-needed default mode is marker-only for public-safe Action Button behavior
   - action button triggers manager-reported Needs reflash markers only and never auto-installs ZIPs
@@ -944,6 +1012,7 @@ case "$cmd" in
     if [ "${2:-}" = "--dry-run" ]; then auto_trigger_dry_run
     elif [ "${2:-}" = "--yes" ]; then auto_trigger 1
     else usage; exit 2; fi ;;
+  auto-ids) auto_profile_ids "${2:-morphe}" ;;
   config-show) config_show ;;
   config-auto) shift; write_config_auto "$@" ;;
   help|-h|--help) usage ;;

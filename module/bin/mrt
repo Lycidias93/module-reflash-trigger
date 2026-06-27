@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev9"
-MODULE_VERSION_CODE="10109"
+MODULE_VERSION="v0.1.1-dev10"
+MODULE_VERSION_CODE="10110"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -372,6 +372,7 @@ auto_profile_match() {
   prop=$(module_prop "$id")
   [ -f "$prop" ] || return 1
   blob=$( {
+  auto_profile_excluded "$id" "$blob" && return 1
     printf '%s
 ' "$id"
     prop_get name "$prop"
@@ -399,7 +400,19 @@ auto_profile_ids() {
 }
 
 
+
+auto_profile_is_self_module() {
+  case "${1:-}" in
+    module-reflash-trigger|module_reflash_trigger|mrt|MRT) return 0 ;;
+  esac
+  case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')" in
+    *module-reflash-trigger*|*module\ reflash\ trigger*) return 0 ;;
+  esac
+  return 1
+}
+
 auto_profile_excluded() {
+  auto_profile_is_self_module "${1:-}" "${2:-}" && return 0
   id="$1"
   blob="${2:-}"
   case "$id" in

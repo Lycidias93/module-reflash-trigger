@@ -21,7 +21,7 @@ mrt_morphe_ids() {
     updateJson="$(mrt_prop_get updateJson "$prop")"
     [ -n "$updateJson" ] || continue
     blob="$(printf '%s\n%s\n%s\n%s\n' "$id" "$(mrt_prop_get name "$prop")" "$(mrt_prop_get description "$prop")" "$updateJson" | tr '[:upper:]' '[:lower:]')"
-    case "$id $blob" in *rvmm*|*zygisk-mount*|*zygisk_mount*|*mounts\ the\ rvmm*|*mounts-the-rvmm*) continue ;; esac
+    case "$id $blob" in module-reflash-trigger*|*module-reflash-trigger*|*module\ reflash\ trigger*|*rvmm*|*zygisk-mount*|*zygisk_mount*|*mounts\ the\ rvmm*|*mounts-the-rvmm*) continue ;; esac
     case "$blob" in *morphe*|*revanced-magisk-module*|*revanced*|*j-hc/revanced*) printf '%s\n' "$id" ;; esac
   done | sort
 }
@@ -46,7 +46,7 @@ mrt_write_config_morphe() {
   ids="$(mrt_morphe_ids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   cat > "$RUNTIME/config.env" <<EOF
 # Module Reflash Trigger config
-# Installer-selected strict Morphe/ReVanced app auto profile; rvmm/helper modules excluded.
+# Installer-selected strict Morphe/ReVanced app auto profile; self/rvmm/helper modules excluded.
 MRT_BOOT_AUTOSCAN=0
 MRT_AUTO_TRIGGER_ON_BOOT=$on_boot
 MRT_AUTO_TRIGGER_ENABLED=1

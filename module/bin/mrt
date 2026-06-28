@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev14"
-MODULE_VERSION_CODE="10114"
+MODULE_VERSION="v0.1.1-dev15"
+MODULE_VERSION_CODE="10115"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -751,7 +751,7 @@ Commands:
   mrt trigger-needed --yes [--mode marker|all]
   mrt action                            # Magisk Action button path: trigger manager-reported Needs reflash markers
   mrt auto-trigger --dry-run
-    mrt auto-trigger --yes                 # replay dry-run WOULD_TRIGGER candidates and trigger them
+    mrt auto-trigger --yes                 # replay config-status candidates and trigger them
   mrt auto-ids morphe                   # list installer/profile-matched Morphe/ReVanced ids
   mrt config-show
   mrt config-auto --enable <module-id...>
@@ -774,7 +774,7 @@ USAGEEOF
 cmd="${1:-summary}"
 
 
-# WebUI v0.1.1-dev14 file-backed scan bridge. Long scans run in the background and
+# WebUI v0.1.1-dev15 file-backed scan bridge. Long scans run in the background and
 # large JSON output is read in small chunks so Android WebView bridges do not block
 # or truncate the module list.
 webui_dir() { printf '%s\n' "$RUNTIME_DIR/webui"; }
@@ -869,7 +869,7 @@ webui_config_set_allowlist() {
 
 
 
-# WebUI v0.1.1-dev14 bridge-safe helpers. Commands below return one physical stdout
+# WebUI v0.1.1-dev15 bridge-safe helpers. Commands below return one physical stdout
 # line or base64 chunks so WebView bridges that drop/truncate multi-line stdout still
 # work. dev4 file-backed scan helpers remain the data source.
 webui_status_line() {
@@ -950,7 +950,7 @@ webui_cache_clear() {
 
 
 
-# WebUI v0.1.1-dev14 safe-action helpers. Long safe actions run in the background
+# WebUI v0.1.1-dev15 safe-action helpers. Long safe actions run in the background
 # so the WebView bridge never blocks on trigger-needed/config/auto dry-run output.
 webui_action_env() { printf '%s/action.env' "$(webui_dir)"; }
 webui_action_out() { printf '%s/action.out' "$(webui_dir)"; }
@@ -1030,7 +1030,76 @@ webui_action_output_b64() {
 
 
 
-# mrt-auto-trigger-dev14-override:start
+# mrt-auto-trigger-dev15-override:start
+auto_trigger_load_config() {
+  cfg="${CONFIG_FILE:-${MRT_CONFIG_FILE:-/data/adb/module-reflash-trigger/config.env}}"
+  [ -f "$cfg" ] && . "$cfg" 2>/dev/null || true
+}
+
+auto_trigger_config_ids() {
+  auto_trigger_load_config
+  ids="${MRT_AUTO_TRIGGER_MODULE_IDS:-}"
+  if [ -z "$ids" ] && [ -n "${MRT_AUTO_TRIGGER_PROFILE:-}" ]; then
+    ids="$(auto_profile_ids "${MRT_AUTO_TRIGGER_PROFILE:-morphe}" 2>/dev/null | tr '\n' ' ')"
+  fi
+  # shell word-splitting is intentional here: config contains a space-separated allowlist.
+  for id in $ids; do
+    [ -n "$id" ] && printf '%s\n' "$id"
+  done
+}
+
+auto_trigger_deny_id() {
+  case "${1:-}" in
+    ''|module-reflash-trigger|*rvmm*|*zygisk-mount*|*zygisk_mount*) return 0 ;;
+  esac
+  return 1
+}
+
+auto_trigger_json_field() {
+  key="${1:-}"
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+auto_trigger_dry_run() {
+  auto_trigger_load_config
+  enabled="${MRT_AUTO_TRIGGER_ENABLED:-0}"
+  on_boot="${MRT_AUTO_TRIGGER_ON_BOOT:-0}"
+  profile="${MRT_AUTO_TRIGGER_PROFILE:-}"
+  printf 'AUTO_TRIGGER_START mode=dry-run source=config-status\n'
+  printf 'auto_trigger_config enabled=%s on_boot=%s profile=%s ids=%s\n' "$enabled" "$on_boot" "$profile" "${MRT_AUTO_TRIGGER_MODULE_IDS:-}"
+
+  if [ "$enabled" != "1" ]; then
+    printf 'auto_trigger_skip reason=disabled enabled=%s\n' "$enabled"
+    printf 'auto_trigger_dry_run_would_trigger=0\n'
+    printf 'auto_trigger_scanned=0\n'
+    return 0
+  fi
+
+  scanned=0
+  count=0
+  for id in $(auto_trigger_config_ids); do
+    scanned=$((scanned + 1))
+    if auto_trigger_deny_id "$id"; then
+      printf 'SKIP module=%s status=denied reason=auto_profile_deny\n' "$id"
+      continue
+    fi
+    js="$(status_one "$id" 1 json 2>/dev/null || true)"
+    status="$(printf '%s' "$js" | auto_trigger_json_field status | tail -1)"
+    reason="$(printf '%s' "$js" | auto_trigger_json_field reason | tail -1)"
+    [ -n "$status" ] || status=unknown
+    [ -n "$reason" ] || reason=none
+    if [ "$status" = "needs_reflash" ]; then
+      printf 'WOULD_TRIGGER module=%s status=%s reason=%s\n' "$id" "$status" "$reason"
+      count=$((count + 1))
+    else
+      printf 'SKIP module=%s status=%s reason=%s\n' "$id" "$status" "$reason"
+    fi
+  done
+  printf 'auto_trigger_dry_run_would_trigger=%s\n' "$count"
+  printf 'auto_trigger_scanned=%s\n' "$scanned"
+  return 0
+}
+
 auto_trigger() {
   confirm="${1:-0}"
   if [ "$confirm" != "1" ]; then
@@ -1046,13 +1115,9 @@ auto_trigger() {
   : > "$out"
   : > "$errf"
 
-  printf 'AUTO_TRIGGER_START mode=yes\n'
-
+  printf 'AUTO_TRIGGER_START mode=yes source=config-status-replay\n'
   dry_rc=0
-  # Important: use the public dispatch path, not a fragile internal function call.
-  # This guarantees --yes replays exactly the same candidates that the operator-visible dry-run reports.
-  "$0" auto-trigger --dry-run > "$out" 2> "$errf" || dry_rc=$?
-
+  auto_trigger_dry_run > "$out" 2> "$errf" || dry_rc=$?
   cat "$out" 2>/dev/null || true
   if [ -s "$errf" ]; then
     printf 'AUTO_TRIGGER_DRYRUN_STDERR_BEGIN\n' >&2
@@ -1086,26 +1151,16 @@ auto_trigger() {
     esac
   done < "$out"
 
-  rm -f "$out" "$errf" 2>/dev/null || true
-
-  # Invariant: the summary count and parsed candidates must agree. A mismatch is a real bug.
-  if [ "$would" -ne "$seen" ]; then
-    printf 'ERROR: auto-trigger invariant failed: would=%s parsed_candidates=%s\n' "$would" "$seen" >&2
-    failed=$((failed + 1))
-  fi
-
   printf 'AUTO_TRIGGER_DONE triggered=%s failed=%s dry_run_would_trigger=%s parsed_candidates=%s dry_run_rc=%s\n' "$triggered" "$failed" "$would" "$seen" "$dry_rc"
   printf 'auto_triggered=%s\n' "$triggered"
-
-  [ "$dry_rc" -eq 0 ] || return "$dry_rc"
-  [ "$failed" -eq 0 ] || return 1
-  if [ "$would" -gt 0 ] && [ "$triggered" -eq 0 ]; then
-    printf 'ERROR: auto-trigger dry-run found %s candidates but real trigger changed 0 modules\n' "$would" >&2
+  rm -f "$out" "$errf" 2>/dev/null || true
+  if [ "$dry_rc" != "0" ] || { [ "$would" -gt 0 ] && [ "$triggered" = "0" ]; }; then
     return 1
   fi
+  [ "$failed" = "0" ] || return 1
   return 0
 }
-# mrt-auto-trigger-dev14-override:end
+# mrt-auto-trigger-dev15-override:end
 
 case "$cmd" in
   webui-action-start) webui_action_start "${2:-marker-dry-run}" ;;

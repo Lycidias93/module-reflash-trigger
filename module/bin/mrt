@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev11"
-MODULE_VERSION_CODE="10111"
+MODULE_VERSION="v0.1.1-dev12"
+MODULE_VERSION_CODE="10112"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -1026,6 +1026,81 @@ webui_action_output_b64() {
   dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null | base64 | tr -d '\n'
   printf '\n'
 }
+
+
+# mrt-auto-trigger-dev12-override:start
+auto_trigger() {
+  confirm="${1:-0}"
+  if [ "$confirm" != "1" ]; then
+    printf 'ERROR: auto-trigger real mode requires --yes\n' >&2
+    return 2
+  fi
+
+  rt="${MRT_RUNTIME_DIR:-/data/adb/module-reflash-trigger}"
+  tmpdir="$rt/tmp"
+  mkdir -p "$tmpdir" 2>/dev/null || true
+  out="$tmpdir/auto-trigger.$$.out"
+  errf="$tmpdir/auto-trigger.$$.err"
+  : > "$out"
+  : > "$errf"
+
+  printf 'AUTO_TRIGGER_START mode=yes\n'
+  if auto_trigger_dry_run > "$out" 2> "$errf"; then
+    dry_rc=0
+  else
+    dry_rc=$?
+  fi
+
+  cat "$out" 2>/dev/null || true
+  if [ -s "$errf" ]; then
+    printf 'AUTO_TRIGGER_DRYRUN_STDERR_BEGIN\n' >&2
+    cat "$errf" >&2 2>/dev/null || true
+    printf 'AUTO_TRIGGER_DRYRUN_STDERR_END\n' >&2
+  fi
+
+  would="$(grep -E '^auto_trigger_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  case "$would" in ''|*[!0-9]*) would=0 ;; esac
+
+  triggered=0
+  failed=0
+  while IFS= read -r line; do
+    case "$line" in
+      WOULD_TRIGGER\ module=*)
+        id="${line#WOULD_TRIGGER module=}"
+        id="${id%% *}"
+        if [ -z "$id" ]; then
+          continue
+        fi
+        printf 'AUTO_TRIGGER_CANDIDATE module=%s\n' "$id"
+        if trigger_one "$id" 1 0; then
+          triggered=$((triggered + 1))
+          printf 'AUTO_TRIGGER_TRIGGERED module=%s\n' "$id"
+        else
+          rc=$?
+          failed=$((failed + 1))
+          printf 'AUTO_TRIGGER_FAILED module=%s rc=%s\n' "$id" "$rc" >&2
+        fi
+        ;;
+    esac
+  done < "$out"
+
+  rm -f "$out" "$errf" 2>/dev/null || true
+  printf 'AUTO_TRIGGER_DONE triggered=%s failed=%s dry_run_would_trigger=%s dry_run_rc=%s\n' "$triggered" "$failed" "$would" "$dry_rc"
+  printf 'auto_triggered=%s\n' "$triggered"
+
+  if [ "$dry_rc" != 0 ]; then
+    return "$dry_rc"
+  fi
+  if [ "$failed" -gt 0 ]; then
+    return 1
+  fi
+  if [ "$would" -gt 0 ] && [ "$triggered" -eq 0 ]; then
+    printf 'ERROR: auto-trigger dry-run found %s candidates but real trigger changed 0 modules\n' "$would" >&2
+    return 1
+  fi
+  return 0
+}
+# mrt-auto-trigger-dev12-override:end
 
 case "$cmd" in
   webui-action-start) webui_action_start "${2:-marker-dry-run}" ;;

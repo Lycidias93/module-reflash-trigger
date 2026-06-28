@@ -1,7 +1,7 @@
 id=module-reflash-trigger
 name=Module Reflash Trigger
-version=v0.1.1-dev11
-versionCode=10111
+version=v0.1.1-dev12
+versionCode=10112
 author=Lycidias93
-description=Lists updateJson-capable modules and safely lowers selected module versionCode to re-enable manager-side online reflash/update; includes installer-selectable strict app auto profile with self/helper exclusions and boot auto logs.
+description=Lists updateJson-capable modules and safely lowers selected module versionCode to re-enable manager-side online reflash/update; includes strict app auto profile and dev12 unified dry-run/yes auto-trigger path.
 updateJson=https://raw.githubusercontent.com/Lycidias93/module-reflash-trigger/main/update.json

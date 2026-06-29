@@ -23,7 +23,7 @@ mrt_log() {
 
 mrt_boot_auto() {
   mkdir -p "$LOGDIR"
-  mrt_log "service_start version=v0.1.1-dev15 moddir=$MODDIR"
+  mrt_log "service_start version=v0.1.1-dev16 moddir=$MODDIR"
 
   # Let Magisk/root manager finish module activation and network settle.
   sleep 60
@@ -52,10 +52,11 @@ mrt_boot_auto() {
     return 0
   fi
 
+  : > "$ERR"
   {
     echo "== boot auto trigger =="
     mrt_ts
-    echo "version=v0.1.1-dev15"
+    echo "version=v0.1.1-dev16"
     echo "enabled=$enabled"
     echo "on_boot=$on_boot"
     echo "profile=$profile"

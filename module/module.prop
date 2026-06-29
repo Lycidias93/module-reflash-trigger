@@ -1,7 +1,7 @@
 id=module-reflash-trigger
 name=Module Reflash Trigger
-version=v0.1.1-dev15
-versionCode=10115
+version=v0.1.1-dev16
+versionCode=10116
 author=Lycidias93
-description=Lists updateJson-capable modules and safely lowers selected module versionCode to re-enable manager-side online reflash/update; includes dev15 boot-safe config-status auto-trigger replay.
+description=Lists updateJson-capable modules and safely lowers selected module versionCode to re-enable manager-side online reflash/update; includes dev16 force-gated needs-reflash auto-trigger replay.
 updateJson=https://raw.githubusercontent.com/Lycidias93/module-reflash-trigger/main/update.json

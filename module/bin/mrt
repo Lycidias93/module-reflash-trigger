@@ -3,7 +3,7 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.1-dev16"
+MODULE_VERSION="v0.1.1"
 MODULE_VERSION_CODE="10116"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
@@ -774,7 +774,7 @@ USAGEEOF
 cmd="${1:-summary}"
 
 
-# WebUI v0.1.1-dev16 file-backed scan bridge. Long scans run in the background and
+# WebUI v0.1.1 file-backed scan bridge. Long scans run in the background and
 # large JSON output is read in small chunks so Android WebView bridges do not block
 # or truncate the module list.
 webui_dir() { printf '%s\n' "$RUNTIME_DIR/webui"; }
@@ -869,7 +869,7 @@ webui_config_set_allowlist() {
 
 
 
-# WebUI v0.1.1-dev16 bridge-safe helpers. Commands below return one physical stdout
+# WebUI v0.1.1 bridge-safe helpers. Commands below return one physical stdout
 # line or base64 chunks so WebView bridges that drop/truncate multi-line stdout still
 # work. dev4 file-backed scan helpers remain the data source.
 webui_status_line() {
@@ -950,7 +950,7 @@ webui_cache_clear() {
 
 
 
-# WebUI v0.1.1-dev16 safe-action helpers. Long safe actions run in the background
+# WebUI v0.1.1 safe-action helpers. Long safe actions run in the background
 # so the WebView bridge never blocks on trigger-needed/config/auto dry-run output.
 webui_action_env() { printf '%s/action.env' "$(webui_dir)"; }
 webui_action_out() { printf '%s/action.out' "$(webui_dir)"; }
@@ -1179,7 +1179,7 @@ auto_trigger() {
   : > "$out"
   : > "$errf"
 
-  printf 'AUTO_TRIGGER_START mode=yes source=dev16-config-status-force-replay\n'
+  printf 'AUTO_TRIGGER_START mode=yes source=config-status-force-replay\n'
 
   dry_rc=0
   "$0" auto-trigger --dry-run > "$out" 2> "$errf" || dry_rc=$?

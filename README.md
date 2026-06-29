@@ -43,7 +43,7 @@ mrt config-auto --disable
 
 ## Version
 
-v0.1.0 / versionCode 16
+v0.1.1 / versionCode 10117
 
 <!-- MRT_README_V010_EXPANDED_20260623_BEGIN -->
 ## What MRT does
@@ -152,3 +152,29 @@ b7dae60fc3630890a2b6fa1a526498d774e2d0a4c370b76d362c28222d7c9582  module-reflash
 ```
 
 <!-- MRT_README_V010_EXPANDED_20260623_END -->
+
+<!-- MRT_README_V011_RELEASE_20260630_BEGIN -->
+## v0.1.1 release notes
+
+- WebUI is included for scanning, status review, dry-runs, and safe trigger actions.
+- Boot auto-trigger remains opt-in. The installer profile `[1] Morphe/ReVanced apps auto on boot` writes a strict allowlist for `music-morphe-jhc-arm64`, `reddit-morphe-jhc`, and `youtube-morphe-jhc` while excluding MRT itself and helper modules.
+- The boot path replays only dry-run `needs_reflash` candidates from the configured allowlist and uses the existing trigger safety checks before force-gated `needs_reflash` handling.
+- MRT still does not download or install third-party module ZIPs. It only prepares already-installed modules so the root/module manager can perform its normal online reflash/update.
+- After a successful manager-side reflash/update, run `mrt mark-fresh <module-id>` for the refreshed module. This closes the remote baseline so the next boot dry-run returns zero.
+
+### Verified dev16 release-candidate flow
+
+```text
+Boot auto-trigger detected 3 Morphe/ReVanced `needs_reflash` candidates.
+MRT lowered their local `versionCode` to re-enable manager-side update/reflash.
+The root manager restored real module versions.
+`mrt mark-fresh` closed the baseline.
+A final auto dry-run returned `auto_trigger_dry_run_would_trigger=0`.
+```
+
+### v0.1.1 release asset SHA256
+
+```text
+SHA256 is emitted by the release build log for `module-reflash-trigger-v0.1.1.zip`. No `.sha256` sidecar is published.
+```
+<!-- MRT_README_V011_RELEASE_20260630_END -->

@@ -3,8 +3,8 @@ set -eu
 
 MODULE_ID="module-reflash-trigger"
 MODULE_NAME="Module Reflash Trigger"
-MODULE_VERSION="v0.1.0"
-MODULE_VERSION_CODE="100"
+MODULE_VERSION="v0.1.1"
+MODULE_VERSION_CODE="10116"
 MODULES_DIR="/data/adb/modules"
 RUNTIME_DIR="/data/adb/module-reflash-trigger"
 BACKUP_DIR="$RUNTIME_DIR/backups"
@@ -366,12 +366,105 @@ mark_fresh() {
   log "mark_fresh module=$id mode=$mode"
 }
 
+auto_profile_match() {
+  id="$1"
+  profile="${2:-${MRT_AUTO_TRIGGER_PROFILE:-}}"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || return 1
+  blob=$( {
+  auto_profile_excluded "$id" "$blob" && return 1
+    printf '%s
+' "$id"
+    prop_get name "$prop"
+    prop_get description "$prop"
+    prop_get updateJson "$prop"
+  } | tr '[:upper:]' '[:lower:]' 2>/dev/null || true )
+  case "$profile" in
+    morphe|revanced|revanced-morphe)
+      case "$blob" in
+        *morphe*|*revanced-magisk-module*|*revanced*|*j-hc/revanced*) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+auto_profile_ids() {
+  profile="${1:-morphe}"
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    auto_profile_match "$id" "$profile" && printf '%s
+' "$id"
+  done | sort
+}
+
+
+
+auto_profile_is_self_module() {
+  case "${1:-}" in
+    module-reflash-trigger|module_reflash_trigger|mrt|MRT) return 0 ;;
+  esac
+  case "$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')" in
+    *module-reflash-trigger*|*module\ reflash\ trigger*) return 0 ;;
+  esac
+  return 1
+}
+
+auto_profile_excluded() {
+  auto_profile_is_self_module "${1:-}" "${2:-}" && return 0
+  id="$1"
+  blob="${2:-}"
+  case "$id" in
+    rvmm*|*rvmm*|*zygisk-mount*|*zygisk_mount*) return 0 ;;
+  esac
+  case "$blob" in
+    *rvmm*|*zygisk-mount*|*zygisk_mount*|*mounts\ the\ rvmm*|*mounts-the-rvmm*) return 0 ;;
+  esac
+  return 1
+}
+
+auto_profile_match() {
+  id="$1"
+  profile="${2:-${MRT_AUTO_TRIGGER_PROFILE:-}}"
+  prop=$(module_prop "$id")
+  [ -f "$prop" ] || return 1
+  blob=$( {
+    printf '%s
+' "$id"
+    prop_get name "$prop"
+    prop_get description "$prop"
+    prop_get updateJson "$prop"
+  } | tr '[:upper:]' '[:lower:]' 2>/dev/null || true )
+  auto_profile_excluded "$id" "$blob" && return 1
+  case "$profile" in
+    morphe|revanced|revanced-morphe)
+      case "$blob" in
+        *morphe*|*revanced-magisk-module*|*revanced*|*j-hc/revanced*) return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+auto_profile_ids() {
+  profile="${1:-morphe}"
+  for id in $(list_module_ids); do
+    prop=$(module_prop "$id")
+    is_update_capable "$prop" || continue
+    auto_profile_match "$id" "$profile" && printf '%s
+' "$id"
+  done | sort
+}
+
 auto_allowed() {
   id="$1"
   [ "${MRT_AUTO_TRIGGER_ENABLED:-0}" = "1" ] || return 1
   for x in ${MRT_AUTO_TRIGGER_MODULE_IDS:-}; do
     [ "$x" = "$id" ] && return 0
   done
+  profile="${MRT_AUTO_TRIGGER_PROFILE:-}"
+  [ -n "$profile" ] && auto_profile_match "$id" "$profile" && return 0
   return 1
 }
 
@@ -403,6 +496,8 @@ summary() {
   printf 'config=%s\n' "$CONFIG_FILE"
   printf 'auto_enabled=%s\n' "${MRT_AUTO_TRIGGER_ENABLED:-0}"
   printf 'auto_allowlist=%s\n' "${MRT_AUTO_TRIGGER_MODULE_IDS:-}"
+  printf 'auto_profile=%s\n' "${MRT_AUTO_TRIGGER_PROFILE:-}"
+  printf 'auto_on_boot=%s\n' "${MRT_AUTO_TRIGGER_ON_BOOT:-0}"
   printf 'updateJson_capable_modules=%s\n' "$(count_update_capable)"
   return 0
 }
@@ -416,13 +511,41 @@ MRT_BOOT_AUTOSCAN=0
 MRT_AUTO_TRIGGER_ON_BOOT=0
 MRT_AUTO_TRIGGER_ENABLED=0
 MRT_AUTO_TRIGGER_MODULE_IDS=""
+MRT_AUTO_TRIGGER_PROFILE=""
 MRT_AUTO_BASELINE_UNKNOWN=0
 MRT_USE_ZIP_HEAD=0
 EOF
-    printf 'CONFIG_WRITTEN auto_enabled=0 file=%s\n' "$CONFIG_FILE"
+    printf 'CONFIG_WRITTEN auto_enabled=0 file=%s
+' "$CONFIG_FILE"
     return 0
   fi
-  [ "$mode" = "--enable" ] || { err "config-auto requires --enable <module-id...> or --disable"; exit 2; }
+  if [ "$mode" = "--profile" ] || [ "$mode" = "--morphe" ]; then
+    if [ "$mode" = "--morphe" ]; then
+      profile="morphe"
+    else
+      profile="${1:-morphe}"; shift || true
+    fi
+    on_boot=0
+    for arg in "$@"; do
+      case "$arg" in --on-boot|--boot) on_boot=1 ;; --manual|--no-boot) on_boot=0 ;; esac
+    done
+    case "$profile" in morphe|revanced|revanced-morphe) : ;; *) err "unsupported auto profile: $profile"; exit 2 ;; esac
+    ids=$(auto_profile_ids "$profile" | tr '
+' ' ' | sed 's/[[:space:]]*$//')
+    cat > "$CONFIG_FILE" <<EOF
+MRT_BOOT_AUTOSCAN=0
+MRT_AUTO_TRIGGER_ON_BOOT=$on_boot
+MRT_AUTO_TRIGGER_ENABLED=1
+MRT_AUTO_TRIGGER_MODULE_IDS="$ids"
+MRT_AUTO_TRIGGER_PROFILE="$profile"
+MRT_AUTO_BASELINE_UNKNOWN=0
+MRT_USE_ZIP_HEAD=0
+EOF
+    printf 'CONFIG_WRITTEN auto_enabled=1 profile=%s on_boot=%s ids=%s file=%s
+' "$profile" "$on_boot" "$ids" "$CONFIG_FILE"
+    return 0
+  fi
+  [ "$mode" = "--enable" ] || { err "config-auto requires --enable <module-id...>, --profile morphe [--on-boot], --morphe [--on-boot] or --disable"; exit 2; }
   [ $# -gt 0 ] || { err "config-auto --enable requires at least one module id"; exit 2; }
   ids="$*"
   cat > "$CONFIG_FILE" <<EOF
@@ -430,10 +553,12 @@ MRT_BOOT_AUTOSCAN=0
 MRT_AUTO_TRIGGER_ON_BOOT=0
 MRT_AUTO_TRIGGER_ENABLED=1
 MRT_AUTO_TRIGGER_MODULE_IDS="$ids"
+MRT_AUTO_TRIGGER_PROFILE=""
 MRT_AUTO_BASELINE_UNKNOWN=0
 MRT_USE_ZIP_HEAD=0
 EOF
-  printf 'CONFIG_WRITTEN auto_enabled=1 ids=%s file=%s\n' "$ids" "$CONFIG_FILE"
+  printf 'CONFIG_WRITTEN auto_enabled=1 ids=%s file=%s
+' "$ids" "$CONFIG_FILE"
 }
 
 config_show() {
@@ -626,9 +751,11 @@ Commands:
   mrt trigger-needed --yes [--mode marker|all]
   mrt action                            # Magisk Action button path: trigger manager-reported Needs reflash markers
   mrt auto-trigger --dry-run
-  mrt auto-trigger --yes
+    mrt auto-trigger --yes                 # replay config-status candidates and trigger them
+  mrt auto-ids morphe                   # list installer/profile-matched Morphe/ReVanced ids
   mrt config-show
   mrt config-auto --enable <module-id...>
+  mrt config-auto --profile morphe [--on-boot]
   mrt config-auto --disable
 
 Safety:
@@ -636,7 +763,7 @@ Safety:
   - refuses modules without updateJson
   - refuses disabled/remove-marked modules
   - refuses local-newer/update-available modules unless --force is used
-  - auto-trigger is off unless MRT_AUTO_TRIGGER_ENABLED=1 and allowlist is set
+  - auto-trigger is off unless MRT_AUTO_TRIGGER_ENABLED=1 and an allowlist/profile permits the module
   - module-reported Needs reflash markers in module.prop description are treated as needs_reflash
   - trigger-needed default mode is marker-only for public-safe Action Button behavior
   - action button triggers manager-reported Needs reflash markers only and never auto-installs ZIPs
@@ -645,7 +772,511 @@ USAGEEOF
 }
 
 cmd="${1:-summary}"
+
+
+# WebUI v0.1.1 file-backed scan bridge. Long scans run in the background and
+# large JSON output is read in small chunks so Android WebView bridges do not block
+# or truncate the module list.
+webui_dir() { printf '%s\n' "$RUNTIME_DIR/webui"; }
+webui_job_file() { printf '%s\n' "$(webui_dir)/job.env"; }
+webui_scan_file() {
+  case "${1:-online}" in
+    local) printf '%s\n' "$(webui_dir)/scan-local.json" ;;
+    online|*) printf '%s\n' "$(webui_dir)/scan-online.json" ;;
+  esac
+}
+webui_err_file() {
+  case "${1:-online}" in
+    local) printf '%s\n' "$(webui_dir)/scan-local.err" ;;
+    online|*) printf '%s\n' "$(webui_dir)/scan-online.err" ;;
+  esac
+}
+webui_write_job() {
+  mkdir -p "$(webui_dir)"
+  now="$(date +%s 2>/dev/null || echo 0)"
+  {
+    printf 'status=%s\n' "${1:-unknown}"
+    printf 'mode=%s\n' "${2:-}"
+    printf 'updated=%s\n' "$now"
+    printf 'pid=%s\n' "${3:-}"
+    printf 'rc=%s\n' "${4:-}"
+    printf 'message=%s\n' "${5:-}"
+  } > "$(webui_job_file)"
+}
+webui_scan_start() {
+  mode="${1:-online}"
+  case "$mode" in online|local) : ;; *) mode=online ;; esac
+  dir="$(webui_dir)"
+  mkdir -p "$dir"
+  rm -f "$dir/scan-$mode.json.tmp" "$(webui_err_file "$mode")"
+  webui_write_job running "$mode" "" "" "started"
+  ( "$0" __webui_scan_run "$mode" >/dev/null 2>&1 & echo "started mode=$mode" )
+}
+webui_scan_run() {
+  mode="${1:-online}"
+  dir="$(webui_dir)"
+  mkdir -p "$dir"
+  out="$(webui_scan_file "$mode")"
+  err="$(webui_err_file "$mode")"
+  tmp="$out.tmp"
+  webui_write_job running "$mode" "$$" "" "scan_running"
+  if [ "$mode" = "online" ]; then
+    if scan 1 json > "$tmp" 2> "$err"; then rc=0; else rc=$?; fi
+  else
+    if scan 0 json > "$tmp" 2> "$err"; then rc=0; else rc=$?; fi
+  fi
+  if [ "${rc:-1}" = 0 ]; then
+    mv -f "$tmp" "$out"
+    bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+    webui_write_job ok "$mode" "$$" "$rc" "bytes=$bytes"
+  else
+    rm -f "$tmp"
+    webui_write_job failed "$mode" "$$" "$rc" "scan_failed"
+  fi
+  exit "${rc:-1}"
+}
+webui_status() {
+  mkdir -p "$(webui_dir)"
+  job="$(webui_job_file)"
+  if [ -s "$job" ]; then cat "$job"; else webui_write_job idle none "" "" "no_job"; cat "$job"; fi
+  for mode in online local; do
+    f="$(webui_scan_file "$mode")"
+    e="$(webui_err_file "$mode")"
+    if [ -f "$f" ]; then printf '%s_bytes=%s\n' "$mode" "$(wc -c < "$f" 2>/dev/null || echo 0)"; else printf '%s_bytes=0\n' "$mode"; fi
+    if [ -f "$e" ]; then printf '%s_err_bytes=%s\n' "$mode" "$(wc -c < "$e" 2>/dev/null || echo 0)"; else printf '%s_err_bytes=0\n' "$mode"; fi
+  done
+}
+webui_read() {
+  mode="${1:-online}"
+  offset="${2:-0}"
+  count="${3:-4096}"
+  case "$mode" in online|local) : ;; *) mode=online ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=4096 ;; esac
+  [ "$count" -gt 8192 ] 2>/dev/null && count=8192
+  f="$(webui_scan_file "$mode")"
+  [ -f "$f" ] || exit 0
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null || true
+}
+webui_config_set_allowlist() {
+  ids="${*:-}"
+  if [ -z "$ids" ]; then
+    config_auto 0 ""
+  else
+    config_auto 1 "$ids"
+  fi
+}
+
+
+
+# WebUI v0.1.1 bridge-safe helpers. Commands below return one physical stdout
+# line or base64 chunks so WebView bridges that drop/truncate multi-line stdout still
+# work. dev4 file-backed scan helpers remain the data source.
+webui_status_line() {
+  mkdir -p "$(webui_dir)"
+  job="$(webui_job_file)"
+  if [ ! -s "$job" ]; then webui_write_job idle none "" "" "no_job"; fi
+  status=""; mode=""; updated=""; pid=""; rc=""; message=""
+  # shellcheck disable=SC1090
+  . "$job" 2>/dev/null || true
+  online_f="$(webui_scan_file online)"; online_e="$(webui_err_file online)"
+  local_f="$(webui_scan_file local)"; local_e="$(webui_err_file local)"
+  online_bytes=0; online_err_bytes=0; local_bytes=0; local_err_bytes=0
+  [ -f "$online_f" ] && online_bytes="$(wc -c < "$online_f" 2>/dev/null || echo 0)"
+  [ -f "$online_e" ] && online_err_bytes="$(wc -c < "$online_e" 2>/dev/null || echo 0)"
+  [ -f "$local_f" ] && local_bytes="$(wc -c < "$local_f" 2>/dev/null || echo 0)"
+  [ -f "$local_e" ] && local_err_bytes="$(wc -c < "$local_e" 2>/dev/null || echo 0)"
+  # Keep this a single line. Values are normalized to avoid shell/newline surprises.
+  message="$(printf '%s' "${message:-}" | tr '\n; ' '___')"
+  printf 'status=%s;mode=%s;updated=%s;pid=%s;rc=%s;message=%s;online_bytes=%s;online_err_bytes=%s;local_bytes=%s;local_err_bytes=%s\n' \
+    "${status:-unknown}" "${mode:-}" "${updated:-}" "${pid:-}" "${rc:-}" "${message:-}" \
+    "$online_bytes" "$online_err_bytes" "$local_bytes" "$local_err_bytes"
+}
+webui_read_b64() {
+  mode="${1:-online}"
+  offset="${2:-0}"
+  count="${3:-3072}"
+  case "$mode" in online|local) : ;; *) mode=online ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=3072 ;; esac
+  [ "$count" -gt 4096 ] 2>/dev/null && count=4096
+  f="$(webui_scan_file "$mode")"
+  [ -f "$f" ] || { printf '\n'; exit 0; }
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null | base64 | tr -d '\n'
+  printf '\n'
+}
+webui_marker_dry_run_line() {
+  mkdir -p "$(webui_dir)"
+  out="$(webui_dir)/marker-dry-run.out"
+  err="$(webui_dir)/marker-dry-run.err"
+  if trigger_needed --dry-run --mode marker > "$out" 2> "$err"; then xrc=0; else xrc=$?; fi
+  would="$(grep -E '^trigger_needed_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  scanned="$(grep -E '^trigger_needed_scanned=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+  err_bytes="$(wc -c < "$err" 2>/dev/null || echo 0)"
+  printf 'status=%s;rc=%s;would_trigger=%s;scanned=%s;bytes=%s;err_bytes=%s\n' \
+    "$([ "$xrc" = 0 ] && echo ok || echo failed)" "$xrc" "${would:-0}" "${scanned:-0}" "$bytes" "$err_bytes"
+}
+webui_auto_dry_run_line() {
+  mkdir -p "$(webui_dir)"
+  out="$(webui_dir)/auto-dry-run.out"
+  err="$(webui_dir)/auto-dry-run.err"
+  if auto_trigger --dry-run > "$out" 2> "$err"; then xrc=0; else xrc=$?; fi
+  would="$(grep -E '^auto_trigger_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+  err_bytes="$(wc -c < "$err" 2>/dev/null || echo 0)"
+  printf 'status=%s;rc=%s;would_trigger=%s;bytes=%s;err_bytes=%s\n' \
+    "$([ "$xrc" = 0 ] && echo ok || echo failed)" "$xrc" "${would:-0}" "$bytes" "$err_bytes"
+}
+webui_output_read_b64() {
+  name="${1:-marker-dry-run.out}"
+  offset="${2:-0}"
+  count="${3:-3072}"
+  case "$name" in marker-dry-run.out|marker-dry-run.err|auto-dry-run.out|auto-dry-run.err|scan-online.err|scan-local.err|job.env) : ;; *) name=marker-dry-run.out ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=3072 ;; esac
+  [ "$count" -gt 4096 ] 2>/dev/null && count=4096
+  f="$(webui_dir)/$name"
+  [ -f "$f" ] || { printf '\n'; exit 0; }
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null | base64 | tr -d '\n'
+  printf '\n'
+}
+webui_cache_clear() {
+  mkdir -p "$(webui_dir)"
+  rm -f "$(webui_dir)"/scan-online.json "$(webui_dir)"/scan-online.err "$(webui_dir)"/scan-local.json "$(webui_dir)"/scan-local.err "$(webui_dir)"/*.tmp
+  webui_write_job idle none "" "" "cache_cleared"
+  webui_status_line
+}
+
+
+
+# WebUI v0.1.1 safe-action helpers. Long safe actions run in the background
+# so the WebView bridge never blocks on trigger-needed/config/auto dry-run output.
+webui_action_env() { printf '%s/action.env' "$(webui_dir)"; }
+webui_action_out() { printf '%s/action.out' "$(webui_dir)"; }
+webui_action_err() { printf '%s/action.err' "$(webui_dir)"; }
+webui_action_write() {
+  mkdir -p "$(webui_dir)"
+  status="$1"; action="$2"; pid="${3:-}"; rc="${4:-}"; message="${5:-}"
+  message="$(printf '%s' "$message" | tr '\n; ' '___')"
+  {
+    printf 'status=%s\n' "$status"
+    printf 'action=%s\n' "$action"
+    printf 'updated=%s\n' "$(date +%s)"
+    printf 'pid=%s\n' "$pid"
+    printf 'rc=%s\n' "$rc"
+    printf 'message=%s\n' "$message"
+  } > "$(webui_action_env)"
+}
+webui_action_status_line() {
+  mkdir -p "$(webui_dir)"
+  envf="$(webui_action_env)"
+  [ -s "$envf" ] || webui_action_write idle none "" "" no_action
+  status=""; action=""; updated=""; pid=""; rc=""; message=""
+  . "$envf" 2>/dev/null || true
+  out="$(webui_action_out)"; err="$(webui_action_err)"
+  bytes=0; err_bytes=0
+  [ -f "$out" ] && bytes="$(wc -c < "$out" 2>/dev/null || echo 0)"
+  [ -f "$err" ] && err_bytes="$(wc -c < "$err" 2>/dev/null || echo 0)"
+  would=""; scanned=""
+  case "${action:-}" in
+    marker-dry-run)
+      would="$(grep -E '^trigger_needed_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+      scanned="$(grep -E '^trigger_needed_scanned=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+      ;;
+    auto-dry-run)
+      would="$(grep -E '^auto_trigger_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+      ;;
+  esac
+  if [ "${status:-}" = running ] && [ -n "${pid:-}" ] && ! kill -0 "$pid" 2>/dev/null; then
+    status=stale
+    message=pid_not_alive
+  fi
+  printf 'status=%s;action=%s;updated=%s;pid=%s;rc=%s;message=%s;bytes=%s;err_bytes=%s;would_trigger=%s;scanned=%s\n' \
+    "${status:-unknown}" "${action:-}" "${updated:-}" "${pid:-}" "${rc:-}" "${message:-}" "$bytes" "$err_bytes" "${would:-0}" "${scanned:-0}"
+}
+webui_action_start() {
+  action="${1:-marker-dry-run}"
+  case "$action" in marker-dry-run|auto-dry-run|config-show|config-disable) : ;; *) action=marker-dry-run ;; esac
+  mkdir -p "$(webui_dir)"
+  out="$(webui_action_out)"; err="$(webui_action_err)"
+  rm -f "$out" "$err"
+  self="$0"
+  (
+    xrc=0
+    case "$action" in
+      marker-dry-run) "$self" trigger-needed --dry-run --mode marker > "$out" 2> "$err" || xrc=$? ;;
+      auto-dry-run) "$self" auto-trigger --dry-run > "$out" 2> "$err" || xrc=$? ;;
+      config-show) "$self" config-show > "$out" 2> "$err" || xrc=$? ;;
+      config-disable) "$self" config-auto --disable > "$out" 2> "$err" || xrc=$?; "$self" config-show >> "$out" 2>> "$err" || xrc=$? ;;
+    esac
+    if [ "$xrc" = 0 ]; then webui_action_write ok "$action" "$BASHPID" "$xrc" done; else webui_action_write failed "$action" "$BASHPID" "$xrc" failed; fi
+  ) &
+  bgpid="$!"
+  webui_action_write running "$action" "$bgpid" "" started
+  webui_action_status_line
+}
+webui_action_output_b64() {
+  kind="${1:-out}"; offset="${2:-0}"; count="${3:-3072}"
+  case "$kind" in out) f="$(webui_action_out)" ;; err) f="$(webui_action_err)" ;; *) f="$(webui_action_out)" ;; esac
+  case "$offset" in ''|*[!0-9]*) offset=0 ;; esac
+  case "$count" in ''|*[!0-9]*) count=3072 ;; esac
+  [ "$count" -gt 4096 ] 2>/dev/null && count=4096
+  [ -f "$f" ] || { printf '\n'; exit 0; }
+  dd if="$f" bs=1 skip="$offset" count="$count" 2>/dev/null | base64 | tr -d '\n'
+  printf '\n'
+}
+
+
+
+
+# mrt-auto-trigger-dev15-override:start
+auto_trigger_load_config() {
+  cfg="${CONFIG_FILE:-${MRT_CONFIG_FILE:-/data/adb/module-reflash-trigger/config.env}}"
+  [ -f "$cfg" ] && . "$cfg" 2>/dev/null || true
+}
+
+auto_trigger_config_ids() {
+  auto_trigger_load_config
+  ids="${MRT_AUTO_TRIGGER_MODULE_IDS:-}"
+  if [ -z "$ids" ] && [ -n "${MRT_AUTO_TRIGGER_PROFILE:-}" ]; then
+    ids="$(auto_profile_ids "${MRT_AUTO_TRIGGER_PROFILE:-morphe}" 2>/dev/null | tr '\n' ' ')"
+  fi
+  # shell word-splitting is intentional here: config contains a space-separated allowlist.
+  for id in $ids; do
+    [ -n "$id" ] && printf '%s\n' "$id"
+  done
+}
+
+auto_trigger_deny_id() {
+  case "${1:-}" in
+    ''|module-reflash-trigger|*rvmm*|*zygisk-mount*|*zygisk_mount*) return 0 ;;
+  esac
+  return 1
+}
+
+auto_trigger_json_field() {
+  key="${1:-}"
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+auto_trigger_dry_run() {
+  auto_trigger_load_config
+  enabled="${MRT_AUTO_TRIGGER_ENABLED:-0}"
+  on_boot="${MRT_AUTO_TRIGGER_ON_BOOT:-0}"
+  profile="${MRT_AUTO_TRIGGER_PROFILE:-}"
+  printf 'AUTO_TRIGGER_START mode=dry-run source=config-status\n'
+  printf 'auto_trigger_config enabled=%s on_boot=%s profile=%s ids=%s\n' "$enabled" "$on_boot" "$profile" "${MRT_AUTO_TRIGGER_MODULE_IDS:-}"
+
+  if [ "$enabled" != "1" ]; then
+    printf 'auto_trigger_skip reason=disabled enabled=%s\n' "$enabled"
+    printf 'auto_trigger_dry_run_would_trigger=0\n'
+    printf 'auto_trigger_scanned=0\n'
+    return 0
+  fi
+
+  scanned=0
+  count=0
+  for id in $(auto_trigger_config_ids); do
+    scanned=$((scanned + 1))
+    if auto_trigger_deny_id "$id"; then
+      printf 'SKIP module=%s status=denied reason=auto_profile_deny\n' "$id"
+      continue
+    fi
+    js="$(status_one "$id" 1 json 2>/dev/null || true)"
+    status="$(printf '%s' "$js" | auto_trigger_json_field status | tail -1)"
+    reason="$(printf '%s' "$js" | auto_trigger_json_field reason | tail -1)"
+    [ -n "$status" ] || status=unknown
+    [ -n "$reason" ] || reason=none
+    if [ "$status" = "needs_reflash" ]; then
+      printf 'WOULD_TRIGGER module=%s status=%s reason=%s\n' "$id" "$status" "$reason"
+      count=$((count + 1))
+    else
+      printf 'SKIP module=%s status=%s reason=%s\n' "$id" "$status" "$reason"
+    fi
+  done
+  printf 'auto_trigger_dry_run_would_trigger=%s\n' "$count"
+  printf 'auto_trigger_scanned=%s\n' "$scanned"
+  return 0
+}
+
+auto_trigger() {
+  confirm="${1:-0}"
+  if [ "$confirm" != "1" ]; then
+    printf 'ERROR: auto-trigger real mode requires --yes\n' >&2
+    return 2
+  fi
+
+  rt="${MRT_RUNTIME_DIR:-/data/adb/module-reflash-trigger}"
+  tmpdir="$rt/tmp"
+  mkdir -p "$tmpdir" 2>/dev/null || tmpdir="${TMPDIR:-/data/local/tmp}"
+  out="$tmpdir/mrt-auto-trigger.$$.out"
+  errf="$tmpdir/mrt-auto-trigger.$$.err"
+  : > "$out"
+  : > "$errf"
+
+  printf 'AUTO_TRIGGER_START mode=yes source=config-status-replay\n'
+  dry_rc=0
+  auto_trigger_dry_run > "$out" 2> "$errf" || dry_rc=$?
+  cat "$out" 2>/dev/null || true
+  if [ -s "$errf" ]; then
+    printf 'AUTO_TRIGGER_DRYRUN_STDERR_BEGIN\n' >&2
+    cat "$errf" >&2 2>/dev/null || true
+    printf 'AUTO_TRIGGER_DRYRUN_STDERR_END\n' >&2
+  fi
+
+  would="$(grep -E '^auto_trigger_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  case "$would" in ''|*[!0-9]*) would=0 ;; esac
+
+  triggered=0
+  failed=0
+  seen=0
+  while IFS= read -r line; do
+    case "$line" in
+      WOULD_TRIGGER\ module=*)
+        id="${line#WOULD_TRIGGER module=}"
+        id="${id%% *}"
+        [ -n "$id" ] || continue
+        seen=$((seen + 1))
+        printf 'AUTO_TRIGGER_CANDIDATE module=%s\n' "$id"
+        if trigger_one "$id" 1 0; then
+          triggered=$((triggered + 1))
+          printf 'AUTO_TRIGGER_TRIGGERED module=%s\n' "$id"
+        else
+          rc=$?
+          failed=$((failed + 1))
+          printf 'AUTO_TRIGGER_FAILED module=%s rc=%s\n' "$id" "$rc" >&2
+        fi
+        ;;
+    esac
+  done < "$out"
+
+  printf 'AUTO_TRIGGER_DONE triggered=%s failed=%s dry_run_would_trigger=%s parsed_candidates=%s dry_run_rc=%s\n' "$triggered" "$failed" "$would" "$seen" "$dry_rc"
+  printf 'auto_triggered=%s\n' "$triggered"
+  rm -f "$out" "$errf" 2>/dev/null || true
+  if [ "$dry_rc" != "0" ] || { [ "$would" -gt 0 ] && [ "$triggered" = "0" ]; }; then
+    return 1
+  fi
+  [ "$failed" = "0" ] || return 1
+  return 0
+}
+# mrt-auto-trigger-dev15-override:end
+
+
+# mrt-auto-trigger-dev16-override:start
+auto_trigger() {
+  confirm="${1:-0}"
+  if [ "$confirm" != "1" ]; then
+    printf 'ERROR: auto-trigger real mode requires --yes\n' >&2
+    return 2
+  fi
+
+  rt="${MRT_RUNTIME_DIR:-/data/adb/module-reflash-trigger}"
+  tmpdir="$rt/tmp"
+  mkdir -p "$tmpdir" 2>/dev/null || tmpdir="${TMPDIR:-/data/local/tmp}"
+  out="$tmpdir/mrt-auto-trigger.$$.out"
+  errf="$tmpdir/mrt-auto-trigger.$$.err"
+  : > "$out"
+  : > "$errf"
+
+  printf 'AUTO_TRIGGER_START mode=yes source=config-status-force-replay\n'
+
+  dry_rc=0
+  "$0" auto-trigger --dry-run > "$out" 2> "$errf" || dry_rc=$?
+
+  cat "$out" 2>/dev/null || true
+  if [ -s "$errf" ]; then
+    printf 'AUTO_TRIGGER_DRYRUN_STDERR_BEGIN\n' >&2
+    cat "$errf" >&2 2>/dev/null || true
+    printf 'AUTO_TRIGGER_DRYRUN_STDERR_END\n' >&2
+  fi
+
+  would="$(grep -E '^auto_trigger_dry_run_would_trigger=' "$out" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  case "$would" in ''|*[!0-9]*) would=0 ;; esac
+
+  triggered=0
+  failed=0
+  seen=0
+  while IFS= read -r line; do
+    case "$line" in
+      WOULD_TRIGGER\ module=*)
+        id="${line#WOULD_TRIGGER module=}"
+        id="${id%% *}"
+        [ -n "$id" ] || continue
+        seen=$((seen + 1))
+        printf 'AUTO_TRIGGER_CANDIDATE module=%s\n' "$id"
+
+        case "$id" in module-reflash-trigger|''|*/*|*' '..*|*' '*)
+          failed=$((failed + 1))
+          printf 'AUTO_TRIGGER_FAILED module=%s rc=%s reason=unsafe_id\n' "$id" 90 >&2
+          continue
+          ;;
+        esac
+        mdir="/data/adb/modules/$id"
+        if [ -e "$mdir/disable" ] || [ -e "$mdir/remove" ]; then
+          failed=$((failed + 1))
+          printf 'AUTO_TRIGGER_FAILED module=%s rc=%s reason=disabled_or_remove_marked\n' "$id" 91 >&2
+          continue
+        fi
+
+        js="$(status_one "$id" 1 json 2>/dev/null || true)"
+        status="$(printf '%s' "$js" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')"
+        reason="$(printf '%s' "$js" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p')"
+        if [ "$status" != "needs_reflash" ]; then
+          printf 'AUTO_TRIGGER_SKIP module=%s status=%s reason=status_changed current_reason=%s\n' "$id" "$status" "$reason"
+          continue
+        fi
+
+        if trigger_one "$id" 1 1; then
+          triggered=$((triggered + 1))
+          printf 'AUTO_TRIGGER_TRIGGERED module=%s force=needs_reflash\n' "$id"
+        else
+          rc=$?
+          failed=$((failed + 1))
+          printf 'AUTO_TRIGGER_FAILED module=%s rc=%s\n' "$id" "$rc" >&2
+        fi
+        ;;
+    esac
+  done < "$out"
+
+  rm -f "$out" "$errf" 2>/dev/null || true
+
+  printf 'AUTO_TRIGGER_DONE triggered=%s failed=%s dry_run_would_trigger=%s parsed_candidates=%s dry_run_rc=%s force=needs_reflash\n' "$triggered" "$failed" "$would" "$seen" "$dry_rc"
+  printf 'auto_triggered=%s\n' "$triggered"
+
+  if [ "$dry_rc" -ne 0 ]; then
+    return "$dry_rc"
+  fi
+  if [ "$would" -gt 0 ] && [ "$seen" -eq 0 ]; then
+    printf 'ERROR: auto-trigger dry-run reported %s candidates but parsed zero\n' "$would" >&2
+    return 1
+  fi
+  if [ "$would" -gt 0 ] && [ "$triggered" -eq 0 ]; then
+    printf 'ERROR: auto-trigger dry-run reported %s candidates but triggered zero\n' "$would" >&2
+    return 1
+  fi
+  if [ "$failed" -gt 0 ]; then
+    return 1
+  fi
+  return 0
+}
+# mrt-auto-trigger-dev16-override:end
+
 case "$cmd" in
+  webui-action-start) webui_action_start "${2:-marker-dry-run}" ;;
+  webui-action-status-line) webui_action_status_line ;;
+  webui-action-output-b64) webui_action_output_b64 "${2:-out}" "${3:-0}" "${4:-3072}" ;;
+  webui-status-line) webui_status_line ;;
+  webui-read-b64) webui_read_b64 "${2:-online}" "${3:-0}" "${4:-3072}" ;;
+  webui-marker-dry-run-line) webui_marker_dry_run_line ;;
+  webui-auto-dry-run-line) webui_auto_dry_run_line ;;
+  webui-output-read-b64) webui_output_read_b64 "${2:-marker-dry-run.out}" "${3:-0}" "${4:-3072}" ;;
+  webui-cache-clear) webui_cache_clear ;;
+  webui-scan-start) webui_scan_start "${2:-online}" ;;
+  __webui_scan_run) webui_scan_run "${2:-online}" ;;
+  webui-status) webui_status ;;
+  webui-read) webui_read "${2:-online}" "${3:-0}" "${4:-4096}" ;;
+  webui-config-set-allowlist) shift; webui_config_set_allowlist "$@" ;;
   summary) summary ;;
   list|scan) scan 0 text ;;
   scan-json) scan 0 json ;;
@@ -675,6 +1306,7 @@ case "$cmd" in
     if [ "${2:-}" = "--dry-run" ]; then auto_trigger_dry_run
     elif [ "${2:-}" = "--yes" ]; then auto_trigger 1
     else usage; exit 2; fi ;;
+  auto-ids) auto_profile_ids "${2:-morphe}" ;;
   config-show) config_show ;;
   config-auto) shift; write_config_auto "$@" ;;
   help|-h|--help) usage ;;
